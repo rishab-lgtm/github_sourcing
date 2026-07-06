@@ -164,6 +164,16 @@ def format_profile(profile: dict) -> dict:
     bio = profile.get("bio") or ""
     company = profile.get("company") or ""
     fs = founder_signal(bio, company)
+
+    created_at = profile.get("created_at", "")
+    account_age_years = None
+    if created_at:
+        try:
+            created = pd.to_datetime(created_at)
+            account_age_years = round((pd.Timestamp.now(tz='UTC') - created).days / 365, 1)
+        except Exception:
+            pass
+
     return {
         "handle": profile.get("login", ""),
         "name": profile.get("name", ""),
@@ -176,6 +186,7 @@ def format_profile(profile: dict) -> dict:
         "contributes_to_ai": profile.get("contributes_to_ai", False),
         "signal_score": profile.get("signal_score", 0),
         "founder_badges": " ".join(fs["badges"]),
+        "account_age_years": account_age_years,
         "github_url": profile.get("html_url", ""),
     }
 
