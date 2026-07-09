@@ -1,0 +1,6 @@
+streamlit>=1.50.0
+pandas>=2.3.3
+altair>=5.5.0
+python-dotenv>=1.0.0
+supabase>=2.31.0
+requests>=2.32.5
