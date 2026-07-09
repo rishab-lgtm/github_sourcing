@@ -185,7 +185,7 @@ def format_profile(profile: dict) -> dict:
         "top_repos": ", ".join(f"{r['name']}({r['stars']}⭐)" for r in top_repos),
         "contributes_to_ai": profile.get("contributes_to_ai", False),
         "signal_score": profile.get("signal_score", 0),
-        "founder_badges": " ".join(fs["badges"]),
+        "founder_badges": " | ".join(fs["badges"]),
         "account_age_years": account_age_years,
         "github_url": profile.get("html_url", ""),
     }
