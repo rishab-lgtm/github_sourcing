@@ -7,7 +7,11 @@ import html
 import os
 import logging
 import requests
+import time
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +19,7 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_URL = "https://api.resend.com/emails"
 FROM_EMAIL = "onboarding@resend.dev"
 ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "m13.co")
+MAX_SEND_ATTEMPTS = 3
 
 
 def _e(value) -> str:
@@ -26,29 +31,44 @@ def send_email(to: str, subject: str, body_html: str) -> bool:
     if not RESEND_API_KEY:
         log.warning("RESEND_API_KEY not set — skipping email")
         return False
-    if not to or "@" not in to:
+    recipient = (to or "").strip().lower()
+    if not recipient or recipient.count("@") != 1:
         log.warning("Invalid recipient email: %s", to)
         return False
-    if not to.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+    if not recipient.endswith(f"@{ALLOWED_EMAIL_DOMAIN.lower()}"):
         log.warning("Rejected email to non-M13 address: %s", to)
         return False
 
-    try:
-        resp = requests.post(
-            RESEND_URL,
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={"from": FROM_EMAIL, "to": to, "subject": subject, "html": body_html},
-            timeout=10,
-        )
-        if not resp.ok:
-            log.warning("Resend error %d: %s", resp.status_code, resp.text[:200])
-        return resp.ok
-    except Exception as e:
-        log.warning("send_email failed: %s", e)
-        return False
+    for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                RESEND_URL,
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={"from": FROM_EMAIL, "to": recipient, "subject": subject, "html": body_html},
+                timeout=10,
+            )
+            if resp.ok:
+                return True
+            log.warning(
+                "Resend error %d on attempt %d/%d: %s",
+                resp.status_code, attempt, MAX_SEND_ATTEMPTS, resp.text[:200],
+            )
+            # Invalid requests will not improve on retry. Retry only rate limits
+            # and server failures.
+            if resp.status_code < 500 and resp.status_code != 429:
+                return False
+        except requests.RequestException as exc:
+            log.warning("Resend request failed on attempt %d/%d: %s", attempt, MAX_SEND_ATTEMPTS, exc)
+        except Exception as exc:
+            log.warning("send_email failed: %s", exc)
+            return False
+
+        if attempt < MAX_SEND_ATTEMPTS:
+            time.sleep(2 ** (attempt - 1))
+    return False
 
 
 def _score_color(score: int) -> str:

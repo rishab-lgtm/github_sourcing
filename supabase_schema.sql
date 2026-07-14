@@ -117,37 +117,21 @@ create index if not exists idx_candidate_matches_handle on candidate_matches(han
 create index if not exists idx_candidates_score on candidates(signal_score desc);
 create index if not exists idx_audit_log_user on audit_log(user_email, created_at desc);
 
--- ── User context helper ───────────────────────────────────────────────────────
--- The Streamlit app calls this RPC with the authenticated user's email before
--- any user-scoped query. RLS policies read it back via current_setting().
--- The scheduler uses the service key which bypasses RLS entirely.
+-- ── Database boundary ────────────────────────────────────────────────────────
+-- Google OAuth is verified by the Streamlit server, not Supabase Auth. Because
+-- Supabase cannot validate a Google ID token as its own auth.jwt(), direct REST
+-- table access is denied to anon/authenticated roles. All database access goes
+-- through database.py on the trusted server, which applies verified-email owner
+-- filters to every user-scoped query. The service key never reaches the browser.
 
-create or replace function set_user_context(email text)
-returns void
-language sql
-security definer
-as $$
-  select set_config('app.current_user_email', email, true);
-$$;
-
--- Helper used in RLS policies
-create or replace function current_user_email()
-returns text
-language sql
-stable
-as $$
-  select nullif(current_setting('app.current_user_email', true), '');
-$$;
-
--- ── Row-Level Security ───────────────────────────────────────────────────────
--- The Streamlit app uses the anon key → subject to RLS.
--- The scheduler uses the service key → bypasses RLS (trusted server process).
-
+alter table users enable row level security;
+alter table candidates enable row level security;
 alter table saved_searches enable row level security;
 alter table search_runs enable row level security;
 alter table candidate_matches enable row level security;
 alter table notification_preferences enable row level security;
 alter table audit_log enable row level security;
+alter table candidate_snapshots enable row level security;
 
 -- Drop old catch-all policies before creating scoped ones
 drop policy if exists "service_all_saved_searches" on saved_searches;
@@ -155,42 +139,17 @@ drop policy if exists "service_all_search_runs" on search_runs;
 drop policy if exists "service_all_candidate_matches" on candidate_matches;
 drop policy if exists "service_all_notification_prefs" on notification_preferences;
 drop policy if exists "service_all_audit_log" on audit_log;
+drop policy if exists "own_saved_searches" on saved_searches;
+drop policy if exists "own_search_runs" on search_runs;
+drop policy if exists "own_candidate_matches" on candidate_matches;
+drop policy if exists "own_notification_preferences" on notification_preferences;
+drop policy if exists "own_audit_log" on audit_log;
+drop policy if exists "insert_audit_log" on audit_log;
 
--- saved_searches: users see and modify only their own rows
-create policy "own_saved_searches"
-    on saved_searches for all
-    using (user_email = current_user_email())
-    with check (user_email = current_user_email());
+revoke all on table users, candidates, saved_searches, search_runs,
+    candidate_matches, notification_preferences, audit_log, candidate_snapshots
+    from anon, authenticated;
 
--- search_runs: users see only their own runs
-create policy "own_search_runs"
-    on search_runs for all
-    using (user_email = current_user_email())
-    with check (user_email = current_user_email());
-
--- candidate_matches: scoped through run_id → only runs owned by the user
-create policy "own_candidate_matches"
-    on candidate_matches for all
-    using (
-        run_id in (
-            select run_id from search_runs where user_email = current_user_email()
-        )
-    );
-
--- notification_preferences: one row per user, strictly scoped
-create policy "own_notification_preferences"
-    on notification_preferences for all
-    using (user_email = current_user_email())
-    with check (user_email = current_user_email());
-
--- audit_log: users see their own entries; scheduler writes with service key
-create policy "own_audit_log"
-    on audit_log for select
-    using (user_email = current_user_email());
-
-create policy "insert_audit_log"
-    on audit_log for insert
-    with check (true);  -- any authenticated session may write; reads are scoped above
-
--- candidates table: global shared read, no RLS needed (not user-scoped)
--- (intentionally left without RLS — it's a shared profile store)
+-- With RLS enabled and no anon/authenticated policies, direct client access
+-- returns no rows even if a public project key is discovered. service_role
+-- bypasses RLS and is used only inside the trusted server process.

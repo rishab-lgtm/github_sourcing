@@ -9,6 +9,7 @@ import os
 import base64
 import secrets
 import time
+import hmac
 from urllib.parse import urlencode
 
 import requests
@@ -145,7 +146,9 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/spreadsheets",
+        # Sourcing notifications use Resend; requesting Gmail or Sheets access
+        # here would be unnecessary privilege and makes Workspace approval harder.
+        "scope": "openid email profile",
     }
 
     # Restrict to allowed domain (skips account picker if only one match)
@@ -155,18 +158,20 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
     if prompt is not None:
         params["prompt"] = prompt
 
-    # Encode routing params as pipe-delimited state: page|source|company
-    state_parts = [page or "", source or "", company or ""]
+    # A cryptographically random nonce prevents login CSRF. Routing parameters
+    # follow it and are accepted only after the nonce is verified on callback.
+    nonce = st.session_state.get("_oauth_state_nonce") or secrets.token_urlsafe(24)
+    st.session_state._oauth_state_nonce = nonce
+    state_parts = [nonce, page or "", source or "", company or ""]
     # Strip trailing empty segments
     while state_parts and state_parts[-1] == "":
         state_parts.pop()
-    if state_parts:
-        params["state"] = "|".join(state_parts)
+    params["state"] = "|".join(state_parts)
 
     return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
 
 
-def handle_oauth_callback(code: str) -> bool:
+def handle_oauth_callback(code: str, state: str = "") -> bool:
     """
     Exchange the authorization code for tokens via Google's token endpoint,
     verify the ID token, and validate the email domain.
@@ -181,6 +186,12 @@ def handle_oauth_callback(code: str) -> bool:
         st.session_state.auth_error = "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
         return False
 
+    state_nonce = state.split("|", 1)[0] if state else ""
+    expected_nonce = st.session_state.get("_oauth_state_nonce", "")
+    if not state_nonce or not expected_nonce or not hmac.compare_digest(state_nonce, expected_nonce):
+        st.session_state.auth_error = "Invalid or expired login request. Please start sign-in again."
+        return False
+
     try:
         # Exchange authorization code for tokens
         token_response = requests.post(GOOGLE_TOKEN_URL, data={
@@ -189,7 +200,7 @@ def handle_oauth_callback(code: str) -> bool:
             "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
-        })
+        }, timeout=12)
 
         if token_response.status_code != 200:
             error_detail = token_response.json().get("error_description", token_response.text)
@@ -197,16 +208,6 @@ def handle_oauth_callback(code: str) -> bool:
             return False
 
         tokens = token_response.json()
-        st.session_state['gmail_access_token'] = tokens.get('access_token', '')
-        # Google's token response lists exactly which scopes it actually granted —
-        # this can differ from what was requested (e.g. a Workspace admin policy
-        # silently blocking a sensitive scope). Store it so the app can give a
-        # precise, immediate error instead of a generic 403 the first time
-        # something tries to use Gmail.
-        _granted_scope = tokens.get('scope', '')
-        st.session_state['gmail_send_scope_granted'] = 'gmail.send' in _granted_scope
-        st.session_state['_granted_oauth_scope'] = _granted_scope
-
         # Verify the ID token and extract user info
         idinfo = id_token.verify_oauth2_token(
             tokens["id_token"],
@@ -220,10 +221,16 @@ def handle_oauth_callback(code: str) -> bool:
         if not email:
             st.session_state.auth_error = "Could not retrieve email from Google."
             return False
+        if not idinfo.get("email_verified", False):
+            st.session_state.auth_error = "Google did not verify this email address."
+            return False
 
         # Check allowed email domain
         allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "")
-        if allowed_domain and not email.endswith(f"@{allowed_domain}"):
+        if allowed_domain and (
+            not email.lower().endswith(f"@{allowed_domain.lower()}")
+            or idinfo.get("hd", "").lower() != allowed_domain.lower()
+        ):
             st.session_state.auth_error = (
                 f"Access denied. Only @{allowed_domain} email addresses are authorized."
             )
@@ -239,6 +246,7 @@ def handle_oauth_callback(code: str) -> bool:
         st.session_state.auth_error = None
         st.session_state.session_id = session_id
         st.session_state.pending_session_store = True
+        st.session_state.pop("_oauth_state_nonce", None)
         return True
 
     except Exception as e:
@@ -269,16 +277,18 @@ def check_auth() -> bool:
     code = st.query_params.get("code")
     if code:
         state = st.query_params.get("state", "")  # routing params carried through OAuth
-        handle_oauth_callback(code)
+        authenticated = handle_oauth_callback(code, state)
         st.query_params.clear()
-        # Parse pipe-delimited state: page|source|company
+        if not authenticated:
+            return False
+        # Parse pipe-delimited state: nonce|page|source|company
         parts = state.split("|") if state else []
-        if len(parts) >= 1 and parts[0]:
-            st.session_state._pending_page = parts[0]
         if len(parts) >= 2 and parts[1]:
-            st.session_state._pending_source = parts[1]
+            st.session_state._pending_page = parts[1]
         if len(parts) >= 3 and parts[2]:
-            st.session_state._pending_company = parts[2]
+            st.session_state._pending_source = parts[2]
+        if len(parts) >= 4 and parts[3]:
+            st.session_state._pending_company = parts[3]
         return st.session_state.get("authenticated", False)
 
     # Handle session restoration from localStorage (redirect with ?session_id=)

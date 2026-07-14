@@ -18,45 +18,39 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-# Anon key: used by the Streamlit app — goes through RLS, cannot bypass row-level policies.
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
-# Service key: used only by scheduler.py (server-side, trusted process). Never exposed to browser.
+# Streamlit and the scheduler both execute on the server. The service credential
+# stays in this module and is never emitted to HTML, JavaScript, or session state.
+# Direct anon/authenticated table access is denied in supabase_schema.sql.
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", os.environ.get("SUPABASE_KEY", ""))
+ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "m13.co").lower()
 
 
 def get_client() -> Client:
-    """Anon-key client for the Streamlit app. Subject to RLS."""
-    if not SUPABASE_ANON_KEY:
-        raise RuntimeError(
-            "SUPABASE_ANON_KEY is not set. "
-            "Get it from Supabase dashboard → Project Settings → API → anon public key. "
-            "Never use the service key in the Streamlit app — it bypasses all RLS."
-        )
-    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-
-
-def get_service_client() -> Client:
-    """Service-key client. Use ONLY in scheduler.py or other trusted server processes."""
+    """Server-only client. Never return this object to browser-facing code."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY are required")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def _set_user_ctx(client: Client, user_email: str):
-    """
-    Set Postgres session variable so RLS policies can filter by the calling user.
-    Must be called before any user-scoped query on the anon client.
-    """
-    try:
-        client.rpc("set_user_context", {"email": user_email}).execute()
-    except Exception as e:
-        log.debug("set_user_context RPC failed (non-fatal if using service key): %s", e)
+def get_service_client() -> Client:
+    """Explicit alias used by trusted background processes."""
+    return get_client()
+
+
+def _require_user_email(user_email: str) -> str:
+    """Validate the verified Google identity before any user-owned operation."""
+    email = (user_email or "").strip().lower()
+    if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+        raise ValueError(f"A verified @{ALLOWED_EMAIL_DOMAIN} email is required")
+    return email
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 
 def upsert_user(email: str, name: str = "") -> bool:
     """Create or update a user record on login."""
+    email = _require_user_email(email)
     client = get_client()
-    _set_user_ctx(client, email)
     try:
         client.table("users").upsert(
             {"email": email, "name": name, "last_login_at": datetime.utcnow().isoformat()},
@@ -155,9 +149,9 @@ def get_new_since(days: int = 7) -> list:
 def save_search(user_email: str, name: str, intent: str, mode: str,
                 filters: dict = None, notify_on_new: bool = True) -> str:
     """Persist a new saved search. Returns search_id."""
+    user_email = _require_user_email(user_email)
     search_id = str(uuid.uuid4())
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         client.table("saved_searches").insert({
             "search_id": search_id,
@@ -176,8 +170,8 @@ def save_search(user_email: str, name: str, intent: str, mode: str,
 
 
 def get_saved_searches(user_email: str) -> list:
+    user_email = _require_user_email(user_email)
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         return (
             client.table("saved_searches").select("*")
@@ -189,8 +183,8 @@ def get_saved_searches(user_email: str) -> list:
 
 
 def delete_saved_search(search_id: str, user_email: str):
+    user_email = _require_user_email(user_email)
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         client.table("saved_searches").delete().eq("search_id", search_id).eq("user_email", user_email).execute()
         audit(user_email, "saved_search_deleted", {"search_id": search_id})
@@ -214,6 +208,7 @@ def update_saved_search_last_run(search_id: str, result_count: int):
 def create_search_run(user_email: str, intent: str, mode: str,
                       filters: dict = None, saved_search_id: str = None,
                       triggered_by: str = "manual") -> str:
+    user_email = _require_user_email(user_email)
     run_id = str(uuid.uuid4())
     client = get_client()
     try:
@@ -266,8 +261,8 @@ def record_matches(run_id: str, profiles: list, source_query: str = ""):
 
 
 def get_run_history(user_email: str, limit: int = 20) -> list:
+    user_email = _require_user_email(user_email)
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         return (
             client.table("search_runs").select("*")
@@ -302,8 +297,8 @@ def get_prior_handles_for_search(saved_search_id: str) -> set:
 # ── Notification preferences ──────────────────────────────────────────────────
 
 def get_notification_prefs(user_email: str) -> dict:
+    user_email = _require_user_email(user_email)
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         result = client.table("notification_preferences").select("*").eq("user_email", user_email).execute()
         rows = result.data or []
@@ -323,15 +318,17 @@ def get_notification_prefs(user_email: str) -> dict:
 def save_notification_prefs(user_email: str, notify_email: str,
                              recap_frequency: str, notify_on_new_match: bool,
                              digest_recipients: list) -> bool:
+    user_email = _require_user_email(user_email)
+    notify_email = _require_user_email(notify_email)
+    safe_recipients = [_require_user_email(email) for email in (digest_recipients or [])]
     client = get_client()
-    _set_user_ctx(client, user_email)
     try:
         client.table("notification_preferences").upsert({
             "user_email": user_email,
             "notify_email": notify_email,
             "recap_frequency": recap_frequency,
             "notify_on_new_match": notify_on_new_match,
-            "digest_recipients": digest_recipients,
+            "digest_recipients": safe_recipients,
             "updated_at": datetime.utcnow().isoformat(),
         }, on_conflict="user_email").execute()
         audit(user_email, "notification_prefs_updated", {"notify_email": notify_email})

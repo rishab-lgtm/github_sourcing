@@ -27,7 +27,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def run_all_saved_searches():
+def run_saved_search(search: dict, send_fn=None) -> dict:
+    """Run exactly one saved search; isolated for cron and integration testing."""
     from database import (
         get_service_client,
         upsert_profiles,
@@ -38,11 +39,73 @@ def run_all_saved_searches():
         update_saved_search_last_run,
         get_prior_handles_for_search,
         get_notification_prefs,
+        audit,
+    )
+    from search_service import SearchConfig, execute_search
+    from notifications import send_new_profiles_email
+
+    send_fn = send_fn or send_new_profiles_email
+    client = get_service_client()
+    search_id = search["search_id"]
+    user_email = search["user_email"]
+    intent = search["intent"]
+    mode = search["mode"]
+    filters = search.get("filters") or {}
+
+    log.info("Running saved search '%s' for %s (mode=%s)", search["name"], user_email, mode)
+    results = execute_search(SearchConfig.from_saved_search(search))
+    if not results:
+        return {"result_count": 0, "new_count": 0, "notified": False}
+
+    prior_handles = get_prior_handles_for_search(search_id)
+    new_profiles = [profile for profile in results if profile["handle"] not in prior_handles]
+    run_id = create_search_run(
+        user_email=user_email,
+        intent=intent,
+        mode=mode,
+        filters=filters,
+        saved_search_id=search_id,
+        triggered_by="scheduler",
+    )
+    upsert_profiles(results)
+    record_matches(run_id, results, source_query=intent)
+    record_snapshots(results)
+    update_search_run_count(run_id, len(results))
+    update_saved_search_last_run(search_id, len(results))
+
+    notified = False
+    if new_profiles:
+        prefs = get_notification_prefs(user_email)
+        notify_email = prefs.get("notify_email") or user_email
+        if prefs.get("notify_on_new_match", True):
+            notified = send_fn(new_profiles, to_email=notify_email)
+            if notified:
+                now = datetime.utcnow().isoformat()
+                new_handles = [profile["handle"] for profile in new_profiles]
+                client.table("candidate_matches").update({"notified_at": now}).eq(
+                    "run_id", run_id
+                ).in_("handle", new_handles).execute()
+                audit(user_email, "notification_sent", {
+                    "search_name": search["name"],
+                    "new_count": len(new_profiles),
+                    "notify_email": notify_email,
+                    "triggered_by": "scheduler",
+                })
+
+    return {
+        "run_id": run_id,
+        "result_count": len(results),
+        "new_count": len(new_profiles),
+        "notified": notified,
+    }
+
+
+def run_all_saved_searches():
+    from database import (
+        get_service_client,
         get_breakout_candidates,
         audit,
     )
-    from github_sourcing import search_by_intent, find_sf_ai_contributors, find_trending_repo_authors
-    from notifications import send_new_profiles_email
 
     client = get_service_client()
 
@@ -56,79 +119,15 @@ def run_all_saved_searches():
     log.info("Found %d saved searches to run", len(searches))
 
     for s in searches:
-        search_id = s["search_id"]
-        user_email = s["user_email"]
-        intent = s["intent"]
-        mode = s["mode"]
-        filters = s.get("filters") or {}
-
-        log.info("Running saved search '%s' for %s (mode=%s)", s["name"], user_email, mode)
-
         try:
-            if mode == "Intent Search":
-                results = search_by_intent(
-                    intent=intent,
-                    location=filters.get("region", ""),
-                    max_results=60,
-                )
-            elif mode == "SF-Based AI Contributors":
-                results = find_sf_ai_contributors(limit_per_repo=30)
-            else:
-                results = find_trending_repo_authors(days=7)
+            summary = run_saved_search(s)
+            log.info(
+                "'%s': %d total, %d new, notified=%s",
+                s["name"], summary["result_count"], summary["new_count"], summary["notified"],
+            )
         except Exception as e:
             log.error("Search failed for '%s': %s", s["name"], e)
             continue
-
-        if not results:
-            log.info("No results for '%s'", s["name"])
-            continue
-
-        # Find candidates new to this saved search
-        prior_handles = get_prior_handles_for_search(search_id)
-        new_profiles = [p for p in results if p["handle"] not in prior_handles]
-
-        log.info("'%s': %d total, %d new", s["name"], len(results), len(new_profiles))
-
-        # Persist
-        run_id = create_search_run(
-            user_email=user_email,
-            intent=intent,
-            mode=mode,
-            filters=filters,
-            saved_search_id=search_id,
-            triggered_by="scheduler",
-        )
-        upsert_profiles(results)
-        record_matches(run_id, results, source_query=intent)
-        record_snapshots(results)
-        update_search_run_count(run_id, len(results))
-        update_saved_search_last_run(search_id, len(results))
-
-        # Notify if new candidates found
-        if new_profiles:
-            prefs = get_notification_prefs(user_email)
-            notify_email = prefs.get("notify_email") or user_email
-            if prefs.get("notify_on_new_match", True):
-                log.info("Sending notification to %s (%d new)", notify_email, len(new_profiles))
-                sent = send_new_profiles_email(new_profiles, to_email=notify_email)
-                if sent:
-                    # Mark notified_at on the matches
-                    try:
-                        now = datetime.utcnow().isoformat()
-                        new_handles = [p["handle"] for p in new_profiles]
-                        client.table("candidate_matches").update({"notified_at": now}).eq("run_id", run_id).in_("handle", new_handles).execute()
-                    except Exception as e:
-                        log.warning("Could not set notified_at: %s", e)
-                    audit(user_email, "notification_sent", {
-                        "search_name": s["name"],
-                        "new_count": len(new_profiles),
-                        "notify_email": notify_email,
-                        "triggered_by": "scheduler",
-                    })
-                else:
-                    log.warning("Notification failed for %s", user_email)
-        else:
-            log.info("No new candidates for '%s' — skipping notification", s["name"])
 
     # ── Breakout alerts ───────────────────────────────────────────────────────
     log.info("Checking for breakout candidates (3x growth in 30 days)…")

@@ -20,6 +20,7 @@ from github_sourcing import (
     get_session_request_count,
     SESSION_REQUEST_LIMIT,
 )
+from search_service import SearchConfig, execute_search
 from database import (
     upsert_user,
     upsert_profiles,
@@ -232,12 +233,12 @@ def apply_filters(df: pd.DataFrame, prev_handles: set = None,
 
 def run_search(mode: str, intent: str, region: str, saved_search_id: str = None,
                triggered_by: str = "manual") -> list:
-    if mode == "Intent Search":
-        return search_by_intent(intent=intent.strip(), location=region.strip(), max_results=60)
-    elif mode == "SF-Based AI Contributors":
-        return find_sf_ai_contributors(limit_per_repo=30)
-    else:
-        return find_trending_repo_authors(days=7)
+    return execute_search(SearchConfig(
+        mode=mode,
+        intent=intent.strip(),
+        region=region.strip(),
+        max_results=60,
+    ))
 
 
 def display_results(results: list, prev_handles: set,
@@ -775,12 +776,12 @@ with tab_settings:
     st.markdown('<div class="section-header">Scheduler</div>', unsafe_allow_html=True)
     st.markdown("""
     <div style="background:white;border-radius:12px;padding:1.25rem 1.5rem;border:1px solid #E8E8EC;font-size:0.85rem;color:#150F3A;">
-        <p style="margin:0 0 0.75rem;font-weight:600;">Auto-run saved searches via cron</p>
+        <p style="margin:0 0 0.75rem;font-weight:600;">Daily automated sourcing</p>
         <p style="margin:0 0 0.5rem;color:#737368;">
-            Add this to your server's crontab to run all saved searches every morning at 8am and notify users of new matches:
+            The Render cron service runs saved searches daily and notifies each owner only about newly matched candidates.
         </p>
         <code style="background:#F7F7F8;padding:0.4rem 0.75rem;border-radius:6px;display:block;margin-top:0.5rem;font-size:0.78rem;color:#0083FF;">
-            0 8 * * * cd /path/to/github_sourcing && python3 scheduler.py >> logs/scheduler.log 2>&1
+            github-sourcing-daily · 16:00 UTC
         </code>
         <p style="margin:0.75rem 0 0;color:#737368;font-size:0.78rem;">
             The scheduler runs each saved search, finds new candidates vs prior runs, and sends email notifications — fully automated, no manual clicks needed.

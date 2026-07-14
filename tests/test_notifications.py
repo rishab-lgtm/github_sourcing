@@ -152,3 +152,13 @@ class TestResendFailureHandling:
         ), "requests.post must include a timeout to avoid hanging"
         if "timeout" in call_kwargs.kwargs:
             assert call_kwargs.kwargs["timeout"] > 0
+
+    def test_transient_failure_is_retried_then_succeeds(self):
+        failed = MagicMock(ok=False, status_code=503, text="unavailable")
+        succeeded = MagicMock(ok=True, status_code=200, text="ok")
+        with patch("notifications.requests.post", side_effect=[failed, succeeded]) as post, \
+             patch("notifications.time.sleep"):
+            notifications.RESEND_API_KEY = "test-key"
+            result = notifications.send_email("user@m13.co", "subj", "<p>body</p>")
+        assert result is True
+        assert post.call_count == 2

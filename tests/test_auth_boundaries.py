@@ -74,17 +74,13 @@ class TestSavedSearchIsolation:
         assert fields["user_email"] == "alice@m13.co"
 
     def test_delete_cannot_be_called_without_user_email(self):
-        """Calling delete with empty user_email should not delete anything meaningful."""
+        """Missing verified identity must fail closed before any database call."""
         import database
         client, chain = _make_supabase_mock()
         with patch("database.get_client", return_value=client):
-            # Should not raise, but the .eq("user_email", "") filter means no rows match
-            database.delete_saved_search("s-abc", "")
-
-        all_eq_calls = chain.eq.call_args_list
-        fields = {c.args[0]: c.args[1] for c in all_eq_calls}
-        # The query still has user_email="" — RLS + app-layer filter both protect against this
-        assert "user_email" in fields
+            with pytest.raises(ValueError):
+                database.delete_saved_search("s-abc", "")
+        client.table.assert_not_called()
 
 
 class TestRunHistoryIsolation:
@@ -129,23 +125,22 @@ class TestNotificationPrefsIsolation:
         assert payload.get("user_email") == "alice@m13.co"
 
 
-class TestUserContextSet:
-    def test_set_user_context_rpc_called_before_user_scoped_queries(self):
-        """
-        The anon-key client must call set_user_context RPC before each user-scoped
-        query so that RLS policies can filter by the calling user.
-        """
+class TestServerDatabaseBoundary:
+    def test_user_scoped_queries_use_owner_filter_without_context_rpc(self):
+        """Ownership is explicit and never relies on transaction-local state."""
         import database
         client, chain = _make_supabase_mock(return_data=[])
         with patch("database.get_client", return_value=client):
             database.get_saved_searches("alice@m13.co")
 
-        rpc_calls = client.rpc.call_args_list
-        ctx_calls = [c for c in rpc_calls if c.args[0] == "set_user_context"]
-        assert len(ctx_calls) > 0, (
-            "set_user_context RPC must be called before user-scoped Supabase queries"
-        )
-        assert ctx_calls[0].args[1] == {"email": "alice@m13.co"}
+        client.rpc.assert_not_called()
+        assert any(c.args == ("user_email", "alice@m13.co") for c in chain.eq.call_args_list)
+
+    @pytest.mark.parametrize("email", ["attacker@gmail.com", "m13.co", "", None])
+    def test_non_m13_identity_is_rejected(self, email):
+        import database
+        with pytest.raises(ValueError):
+            database.get_saved_searches(email)
 
 
 class TestSchedulerUsesServiceKey:
