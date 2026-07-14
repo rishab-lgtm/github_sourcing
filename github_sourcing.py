@@ -1,16 +1,24 @@
 """
-M13 GitHub Sourcing Tool
-Surfaces high-signal engineers and founders from GitHub before they're on anyone's radar.
+M13 GitHub Sourcing — Core search engine.
+Translates user intent into real GitHub discovery queries with keyword expansion,
+proper API handling, explainable scoring, and match reasons.
 """
 
+from __future__ import annotations
+
 import os
+import re
 import time
 import json
 import csv
+import logging
+from datetime import datetime, timedelta, timezone
+
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 HEADERS = {
@@ -19,47 +27,241 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-SF_KEYWORDS = ["san francisco", "sf", "bay area", "silicon valley", "south bay", "palo alto", "menlo park", "mountain view", "sunnyvale", "berkeley", "oakland", "san jose", "santa clara", "fremont", "hayward", "san mateo", "redwood", "cupertino", "campbell", "los altos", "los gatos", "saratoga", "milpitas", "san leandro", "ca, usa", "california"]
-RESEARCHER_KEYWORDS = ["phd", "research", "ml", "ai", "machine learning", "deep learning", "scientist", "lab", "university", "prof"]
-AI_REPOS = [
-    # LLM inference & serving
-    "vllm-project/vllm", "ggerganov/llama.cpp", "ollama/ollama", "lm-sys/FastChat",
-    # Foundational models & training
-    "huggingface/transformers", "facebookresearch/llama", "openai/whisper", "karpathy/nanoGPT",
-    # Agents & tooling
-    "microsoft/autogen", "langchain-ai/langchain", "openai/openai-python",
-    # Infra & platforms
-    "ray-project/ray", "modal-labs/modal-client", "replicate/cog",
-    # Hot recent projects
-    "mistralai/mistral-src", "anthropics/anthropic-sdk-python", "deepseek-ai/DeepSeek-V2",
+TIMEOUT = 12
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2
+
+# ── Per-session rate limit tracker ───────────────────────────────────────────
+# Tracks API calls made this session to warn users before they exhaust the quota.
+_session_request_count = 0
+SESSION_REQUEST_LIMIT = 200  # conservative; GitHub allows 5000/hr authenticated
+
+
+def get_session_request_count() -> int:
+    return _session_request_count
+
+
+def session_budget_ok() -> bool:
+    return _session_request_count < SESSION_REQUEST_LIMIT
+
+
+# ── Keyword expansion maps ───────────────────────────────────────────────────
+DOMAIN_EXPANSIONS: dict[str, list[str]] = {
+    "biotech": [
+        "biotech", "biology", "genomics", "computational biology", "bioinformatics",
+        "protein", "drug discovery", "therapeutics", "AlphaFold", "wet lab",
+        "ml biology", "bio ml", "single cell", "CRISPR", "sequencing",
+        "proteomics", "transcriptomics", "cheminformatics", "molecular",
+    ],
+    "climate": [
+        "climate", "clean energy", "renewable", "carbon", "sustainability",
+        "grid", "battery", "solar", "wind", "emissions", "net zero",
+        "energy storage", "electrification", "climate tech",
+    ],
+    "fintech": [
+        "fintech", "payments", "banking", "lending", "credit", "crypto",
+        "defi", "blockchain", "trading", "risk", "compliance", "regtech",
+        "neobank", "wealth management", "insurtech",
+    ],
+    "robotics": [
+        "robotics", "robot", "autonomous", "ROS", "manipulation", "SLAM",
+        "drone", "embodied", "motion planning", "control systems", "actuator",
+        "perception", "sim to real",
+    ],
+    "security": [
+        "security", "cybersecurity", "infosec", "cryptography", "zero trust",
+        "vulnerability", "penetration testing", "threat", "SOC", "SIEM",
+        "identity", "IAM", "privacy", "encryption",
+    ],
+    "devtools": [
+        "developer tools", "devtools", "SDK", "API", "CLI", "IDE", "compiler",
+        "debugger", "observability", "monitoring", "CI/CD", "deployment",
+        "infrastructure", "platform engineering", "developer experience",
+    ],
+    "ai": [
+        "machine learning", "deep learning", "LLM", "language model", "neural",
+        "transformer", "diffusion", "generative", "inference", "training",
+        "RLHF", "fine tuning", "embedding", "RAG", "agent", "multimodal",
+    ],
+    "healthcare": [
+        "healthcare", "health", "medical", "clinical", "EHR", "imaging",
+        "radiology", "pathology", "digital health", "telehealth", "pharma",
+        "FDA", "HIPAA", "patient", "diagnosis", "treatment",
+    ],
+    "data": [
+        "data engineering", "data pipeline", "ETL", "warehouse", "lakehouse",
+        "dbt", "Spark", "Flink", "Kafka", "Airflow", "analytics", "BI",
+        "streaming", "real time", "data platform",
+    ],
+    "hardware": [
+        "hardware", "chip", "semiconductor", "FPGA", "ASIC", "PCB",
+        "embedded", "firmware", "silicon", "processor", "GPU", "TPU",
+        "edge computing", "IoT",
+    ],
+}
+
+SF_KEYWORDS = [
+    "san francisco", "sf", "bay area", "silicon valley", "south bay",
+    "palo alto", "menlo park", "mountain view", "sunnyvale", "berkeley",
+    "oakland", "san jose", "santa clara", "fremont", "hayward", "san mateo",
+    "redwood city", "cupertino", "campbell", "los altos", "los gatos",
+    "saratoga", "milpitas", "san leandro", "ca, usa", "california",
 ]
 
-# Signals that suggest someone could be a future founder
-FOUNDER_SIGNAL_KEYWORDS = [
-    "building", "founder", "co-founder", "stealth", "prev", "previously", "ex-",
-    "formerly", "alumni", "alum", "independent", "open to", "looking for",
-    "startup", "llm", "agent", "inference", "infra", "platform", "developer tools",
+RESEARCHER_KEYWORDS = [
+    "phd", "research", "ml", "ai", "machine learning", "deep learning",
+    "scientist", "lab", "university", "prof", "postdoc", "grad student",
 ]
+
 TOP_LAB_KEYWORDS = [
     "openai", "deepmind", "google brain", "google deepmind", "meta ai", "fair",
-    "anthropic", "mistral", "cohere", "xai", "inflection", "stability", "hugging face",
-    "nvidia research", "microsoft research", "apple ml", "scale ai", "cerebras",
-    "together ai", "replicate", "modal", "anyscale", "mosaic", "databricks",
+    "anthropic", "mistral", "cohere", "xai", "inflection", "stability",
+    "hugging face", "nvidia research", "microsoft research", "apple ml",
+    "scale ai", "cerebras", "together ai", "replicate", "modal", "anyscale",
+    "mosaic", "databricks",
+]
+
+FOUNDER_SIGNAL_KEYWORDS = [
+    "building", "founder", "co-founder", "stealth", "previously", "ex-",
+    "formerly", "alumni", "independent", "open to", "looking for", "startup",
+    "llm", "agent", "inference", "infra", "platform", "developer tools",
+]
+
+AI_REPOS = [
+    "vllm-project/vllm", "ggerganov/llama.cpp", "ollama/ollama",
+    "huggingface/transformers", "facebookresearch/llama", "openai/whisper",
+    "karpathy/nanoGPT", "microsoft/autogen", "langchain-ai/langchain",
+    "openai/openai-python", "ray-project/ray", "modal-labs/modal-client",
+    "replicate/cog", "mistralai/mistral-src", "deepseek-ai/DeepSeek-V2",
 ]
 
 
-def _get(url, params=None):
-    """Make a GitHub API GET request with basic rate limit handling."""
-    resp = requests.get(url, headers=HEADERS, params=params)
-    if resp.status_code == 403 and "rate limit" in resp.text.lower():
-        reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
-        wait = max(reset - int(time.time()), 1)
-        print(f"  Rate limited — waiting {wait}s...")
-        time.sleep(wait)
-        resp = requests.get(url, headers=HEADERS, params=params)
-    resp.raise_for_status()
-    return resp.json()
+# ── HTTP helpers ─────────────────────────────────────────────────────────────
 
+def _get(url: str, params: dict = None, retries: int = None):
+    """GET with timeout, retry, rate-limit handling, and session budget tracking."""
+    global _session_request_count
+
+    if not session_budget_ok():
+        log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
+        return None
+
+    max_attempts = retries if retries is not None else MAX_RETRIES
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
+            _session_request_count += 1
+        except requests.exceptions.Timeout:
+            log.warning("Timeout on %s (attempt %d/%d)", url, attempt + 1, max_attempts)
+            if attempt < max_attempts - 1:
+                time.sleep(RETRY_BACKOFF * (attempt + 1))
+                continue
+            return None
+        except (requests.exceptions.RequestException, ConnectionError, OSError) as e:
+            log.warning("Request error on %s: %s", url, e)
+            return None
+
+        if resp.status_code in (403, 429) and (
+            "rate limit" in resp.text.lower() or resp.status_code == 429
+        ):
+            reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+            wait = min(max(reset - int(time.time()), 1), 120)
+            log.info("Rate limited (HTTP %d) — waiting %ds...", resp.status_code, wait)
+            time.sleep(wait)
+            continue
+
+        if resp.status_code == 404:
+            return None
+
+        if not resp.ok:
+            log.warning("HTTP %d on %s: %s", resp.status_code, url, resp.text[:200])
+            if attempt < max_attempts - 1:
+                time.sleep(RETRY_BACKOFF)
+                continue
+            return None
+
+        try:
+            return resp.json()
+        except Exception:
+            return None
+
+    return None
+
+
+def _paginate(url: str, params: dict = None, max_pages: int = 3) -> list:
+    """
+    Fetch multiple pages from a GitHub endpoint.
+    Handles both list responses (contributors, etc.) and search responses ({items: [...]}).
+    Stops early when a partial page is returned (no more results).
+    """
+    params = dict(params or {})
+    params.setdefault("per_page", 30)
+    results = []
+    for page in range(1, max_pages + 1):
+        params["page"] = page
+        data = _get(url, params)
+        if data is None:
+            break
+        if isinstance(data, list):
+            results.extend(data)
+            if len(data) < params["per_page"]:
+                break
+        elif isinstance(data, dict) and "items" in data:
+            items = data["items"] or []
+            results.extend(items)
+            if len(items) < params["per_page"]:
+                break
+        else:
+            break
+    return results
+
+
+# ── Keyword expansion ────────────────────────────────────────────────────────
+
+def expand_query(intent: str) -> list[str]:
+    """
+    Turn a free-text intent into GitHub search terms.
+    Matches known domain expansions + always includes the raw words.
+    """
+    intent_lower = intent.lower()
+    terms: set[str] = set(re.findall(r'\b\w+\b', intent_lower))
+
+    for domain, keywords in DOMAIN_EXPANSIONS.items():
+        if domain in intent_lower or any(kw.split()[0] in intent_lower for kw in keywords[:3]):
+            terms.update(keywords)
+
+    for word in re.findall(r'\b\w{3,}\b', intent_lower):
+        terms.add(word)
+
+    return list(terms)
+
+
+def build_github_user_query(intent: str, location: str = "", min_followers: int = 0) -> str:
+    terms = expand_query(intent)
+    bio_terms = sorted(terms, key=len, reverse=True)[:3]
+    bio_q = " OR ".join(f'"{t}"' if " " in t else t for t in bio_terms)
+    parts = [bio_q]
+    if location:
+        parts.append(f'location:"{location}"')
+    if min_followers:
+        parts.append(f"followers:>={min_followers}")
+    return " ".join(parts)
+
+
+def build_github_repo_query(intent: str, language: str = "", since_days: int = 0) -> str:
+    terms = expand_query(intent)
+    q_parts = [t for t in sorted(terms, key=len, reverse=True) if len(t) > 3][:3]
+    parts = [" ".join(q_parts)] if q_parts else [intent]
+    if language:
+        parts.append(f"language:{language}")
+    if since_days:
+        since = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
+        parts.append(f"pushed:>{since}")
+    parts.append("stars:>10")
+    return " ".join(parts)
+
+
+# ── Profile helpers ──────────────────────────────────────────────────────────
 
 def is_sf_based(location: str) -> bool:
     if not location:
@@ -67,267 +269,322 @@ def is_sf_based(location: str) -> bool:
     return any(kw in location.lower() for kw in SF_KEYWORDS)
 
 
-def is_researcher(bio: str, location: str = "") -> bool:
-    text = f"{bio or ''} {location or ''}".lower()
-    return any(kw in text for kw in RESEARCHER_KEYWORDS)
-
-
-def founder_signal(bio: str, company: str = "") -> dict:
-    """
-    Detect founder-like signals from bio and company.
-    Returns {score_boost, badges} where badges are short labels shown in the UI.
-    """
-    text = f"{bio or ''} {company or ''}".lower()
-    badges = []
-    boost = 0
-
-    if any(kw in text for kw in TOP_LAB_KEYWORDS):
-        badges.append("🏛 Top Lab")
-        boost += 20
-
-    if any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS):
-        badges.append("🚀 Building")
-        boost += 15
-
-    if any(kw in text for kw in RESEARCHER_KEYWORDS):
-        badges.append("🔬 Researcher")
-        boost += 10
-
-    return {"boost": boost, "badges": badges}
-
-
 def get_user_profile(username: str) -> dict:
-    """Fetch full profile for a GitHub user."""
-    try:
-        return _get(f"https://api.github.com/users/{username}")
-    except Exception:
+    data = _get(f"https://api.github.com/users/{username}")
+    if not isinstance(data, dict) or not data.get("login"):
         return {}
+    return data
 
 
 def get_user_repos(username: str, limit: int = 5) -> list:
-    """Fetch top repos for a user sorted by stars."""
-    try:
-        repos = _get(f"https://api.github.com/users/{username}/repos", params={"sort": "stars", "per_page": limit})
-        return [{"name": r["name"], "stars": r["stargazers_count"], "language": r["language"], "description": r["description"]} for r in repos]
-    except Exception:
+    repos = _get(
+        f"https://api.github.com/users/{username}/repos",
+        params={"sort": "stars", "per_page": limit},
+    )
+    if not isinstance(repos, list):
         return []
+    return [
+        {
+            "name": r.get("name", ""),
+            "stars": r.get("stargazers_count", 0),
+            "language": r.get("language", ""),
+            "description": r.get("description") or "",
+        }
+        for r in repos
+        if isinstance(r, dict)
+    ]
 
 
-def compute_signal_score(profile: dict, filters: dict) -> int:
-    """Score a profile 0-100 based on active filters."""
+def _account_age_years(created_at: str):
+    if not created_at:
+        return None
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        return round((now - created).days / 365, 1)
+    except Exception:
+        return None
+
+
+# ── Scoring ──────────────────────────────────────────────────────────────────
+
+def founder_signal(bio: str, company: str = "") -> dict:
+    text = f"{bio or ''} {company or ''}".lower()
+    badges, boost = [], 0
+    if any(kw in text for kw in TOP_LAB_KEYWORDS):
+        badges.append("🏛 Top Lab")
+        boost += 20
+    if any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS):
+        badges.append("🚀 Building")
+        boost += 15
+    if any(kw in text for kw in RESEARCHER_KEYWORDS):
+        badges.append("🔬 Researcher")
+        boost += 10
+    return {"boost": boost, "badges": badges}
+
+
+def compute_signal_score(
+    profile: dict,
+    search_terms: list[str] = None,
+    contributes_to_ai: bool = False,
+    is_sf: bool = False,
+) -> tuple[int, list[str]]:
+    """Score 0–100. Returns (score, reasons).
+    top_repos may be a list of dicts (from get_user_repos) or a formatted string
+    like "repo-name (1234⭐)" (from stored/cached profiles).
+    """
+    import re as _re
     score = 0
-    bio = profile.get("bio") or ""
-    location = profile.get("location") or ""
-    company = profile.get("company") or ""
-    followers = profile.get("followers", 0)
+    reasons: list[str] = []
+    bio = (profile.get("bio") or "").lower()
+    company = (profile.get("company") or "").lower()
+    followers = profile.get("followers", 0) or 0
     top_repos = profile.get("top_repos", [])
-    total_stars = sum(r["stars"] for r in top_repos)
 
-    if filters.get("sf") and is_sf_based(location):
-        score += 30
-    if filters.get("researcher") and is_researcher(bio, location):
+    # Normalise top_repos to a star count and text blob regardless of format
+    if isinstance(top_repos, str):
+        total_stars = sum(int(s) for s in _re.findall(r'\((\d+)⭐\)', top_repos))
+        repo_text = top_repos.lower()
+    elif isinstance(top_repos, list):
+        total_stars = sum(r.get("stars", 0) for r in top_repos if isinstance(r, dict))
+        repo_text = " ".join(
+            f"{r.get('name','')} {r.get('description','')}"
+            for r in top_repos if isinstance(r, dict)
+        ).lower()
+    else:
+        total_stars = 0
+        repo_text = ""
+
+    # Also accept contributes_to_ai from the profile dict itself (stored profiles)
+    contributes_to_ai = contributes_to_ai or bool(profile.get("contributes_to_ai"))
+
+    if is_sf:
+        score += 20
+        reasons.append("Based in SF / Bay Area")
+
+    if contributes_to_ai:
         score += 25
-    if filters.get("ai_contributor") and profile.get("contributes_to_ai"):
-        score += 25
-    if total_stars > 1000:
-        score += 15
+        reasons.append("Contributes to major AI repos")
+
+    if search_terms:
+        matched = [t for t in search_terms if t.lower() in bio or t.lower() in repo_text or t.lower() in company]
+        if matched:
+            score += min(len(matched) * 5, 25)
+            reasons.append(f"Matches: {', '.join(matched[:4])}")
+
+    if total_stars > 5000:
+        score += 20
+        reasons.append(f"{total_stars:,} total stars")
+    elif total_stars > 1000:
+        score += 12
+        reasons.append(f"{total_stars:,} total stars")
     elif total_stars > 100:
+        score += 6
+
+    if followers > 1000:
         score += 8
-    if followers > 500:
-        score += 5
+        reasons.append(f"{followers:,} followers")
+    elif followers > 200:
+        score += 4
+
     if followers < 200 and total_stars > 500:
         score += 10
+        reasons.append("Low followers, high stars — hidden gem")
 
-    # founder signal boost
     fs = founder_signal(bio, company)
     score += fs["boost"]
+    for badge in fs["badges"]:
+        reasons.append(f"Signal: {badge.split(' ', 1)[1]}")
 
-    return min(score, 100)
-
-
-def enrich_profile(username: str, filters: dict, contributes_to_ai: bool = False) -> dict:
-    """Fetch and enrich a GitHub user profile."""
-    profile = get_user_profile(username)
-    if not profile:
-        return {}
-
-    top_repos = get_user_repos(username)
-    profile["top_repos"] = top_repos
-    profile["contributes_to_ai"] = contributes_to_ai
-    profile["signal_score"] = compute_signal_score(profile, filters)
-    return profile
+    return min(score, 100), reasons
 
 
-def format_profile(profile: dict) -> dict:
-    """Flatten a profile into a clean output dict."""
+def format_profile(profile: dict, search_terms: list[str] = None,
+                   contributes_to_ai: bool = False, extra: dict = None) -> dict:
     top_repos = profile.get("top_repos", [])
     bio = profile.get("bio") or ""
     company = profile.get("company") or ""
+    location = profile.get("location") or ""
     fs = founder_signal(bio, company)
-
-    created_at = profile.get("created_at", "")
-    account_age_years = None
-    if created_at:
-        try:
-            created = pd.to_datetime(created_at)
-            account_age_years = round((pd.Timestamp.now(tz='UTC') - created).days / 365, 1)
-        except Exception:
-            pass
-
-    return {
-        "handle": profile.get("login", ""),
-        "name": profile.get("name", ""),
-        "location": profile.get("location", "") or "",
+    is_sf = is_sf_based(location)
+    score, reasons = compute_signal_score(
+        profile, search_terms=search_terms,
+        contributes_to_ai=contributes_to_ai, is_sf=is_sf,
+    )
+    result = {
+        "handle": (profile.get("login") or "").lower(),  # always lowercase for dedup consistency
+        "name": profile.get("name") or "",
+        "location": location,
         "bio": bio,
         "company": company,
         "followers": profile.get("followers", 0),
         "public_repos": profile.get("public_repos", 0),
-        "top_repos": ", ".join(f"{r['name']}({r['stars']}⭐)" for r in top_repos),
-        "contributes_to_ai": profile.get("contributes_to_ai", False),
-        "signal_score": profile.get("signal_score", 0),
+        "top_repos": ", ".join(
+            f"{r['name']}({r['stars']}⭐)" for r in top_repos if isinstance(r, dict)
+        ),
+        "contributes_to_ai": contributes_to_ai,
+        "signal_score": score,
+        "match_reasons": reasons,
         "founder_badges": " | ".join(fs["badges"]),
-        "account_age_years": account_age_years,
+        "account_age_years": _account_age_years(profile.get("created_at", "")),
         "github_url": profile.get("html_url", ""),
     }
+    if extra:
+        result.update(extra)
+    return result
 
 
-# --- Filters ---
+# ── Search engine ────────────────────────────────────────────────────────────
 
-def find_sf_ai_contributors(limit_per_repo: int = 30) -> list:
+def search_by_intent(intent: str, location: str = "",
+                     min_followers: int = 0, max_results: int = 60) -> list[dict]:
     """
-    Use case #1: SF-based engineers actively contributing to open source AI projects.
+    Translate free-text intent into real GitHub discovery.
+    Three strategies run sequentially, deduped by handle.
     """
-    print("Scanning AI repos for SF-based contributors...")
-    seen = set()
-    results = []
+    expanded = expand_query(intent)
+    seen: set[str] = set()
+    candidates: list[dict] = []
 
-    for repo in AI_REPOS:
-        print(f"  Checking contributors to {repo}...")
-        try:
-            contributors = _get(f"https://api.github.com/repos/{repo}/contributors", params={"per_page": limit_per_repo})
-        except Exception as e:
-            print(f"  Skipping {repo}: {e}")
+    # Strategy 1: user bio search — paginate up to 3 pages (90 users)
+    user_q = build_github_user_query(intent, location=location, min_followers=min_followers)
+    log.info("User search: %s", user_q)
+    user_items = _paginate("https://api.github.com/search/users", params={
+        "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
+    }, max_pages=3)
+    for item in user_items:
+        username = (item.get("login") or "").lower()
+        if not username or username in seen:
             continue
+        seen.add(username)
+        profile = get_user_profile(username)
+        if not profile or profile.get("type") == "Organization":
+            continue
+        profile["top_repos"] = get_user_repos(username)
+        candidates.append(format_profile(profile, search_terms=expanded))
+        if len(candidates) >= max_results:
+            break
 
-        for contributor in contributors:
-            username = contributor.get("login")
+    # Strategy 2: repo search → authors — paginate up to 2 pages (60 repos)
+    repo_q = build_github_repo_query(intent)
+    log.info("Repo search: %s", repo_q)
+    repo_items = _paginate("https://api.github.com/search/repositories", params={
+        "q": repo_q, "sort": "stars", "order": "desc", "per_page": 30,
+    }, max_pages=2)
+    for repo in repo_items:
+        owner = (repo.get("owner", {}).get("login") or "").lower()
+        if not owner or owner in seen:
+            continue
+        seen.add(owner)
+        profile = get_user_profile(owner)
+        if not profile or profile.get("type") == "Organization":
+            continue
+        profile["top_repos"] = get_user_repos(owner)
+        candidates.append(format_profile(
+            profile, search_terms=expanded,
+            extra={"source_repo": repo.get("full_name"), "source_repo_stars": repo.get("stargazers_count", 0)},
+        ))
+
+    # Strategy 3: topic contributors
+    topic_terms = [t for t in expanded if len(t) > 5][:3]
+    for topic in topic_terms[:2]:
+        topic_slug = topic.lower().replace(" ", "-")
+        topic_repos = _get("https://api.github.com/search/repositories", params={
+            "q": f"topic:{topic_slug} stars:>50", "sort": "stars", "order": "desc", "per_page": 5,
+        })
+        for repo in ((topic_repos or {}).get("items") or [])[:5]:
+            repo_full = repo.get("full_name", "")
+            if not repo_full:
+                continue
+            contributors = _get(
+                f"https://api.github.com/repos/{repo_full}/contributors",
+                params={"per_page": 10},
+            )
+            for c in (contributors if isinstance(contributors, list) else [])[:5]:
+                username = (c.get("login") or "").lower()
+                if not username or username in seen:
+                    continue
+                seen.add(username)
+                profile = get_user_profile(username)
+                if not profile or profile.get("type") == "Organization":
+                    continue
+                profile["top_repos"] = get_user_repos(username)
+                candidates.append(format_profile(
+                    profile, search_terms=expanded, contributes_to_ai=True,
+                    extra={"source_topic": topic},
+                ))
+
+    candidates.sort(key=lambda x: -x["signal_score"])
+    return candidates[:max_results]
+
+
+# ── Legacy scan modes ────────────────────────────────────────────────────────
+
+def find_sf_ai_contributors(limit_per_repo: int = 30) -> list[dict]:
+    seen: set[str] = set()
+    results: list[dict] = []
+    for repo in AI_REPOS:
+        contributors = _get(
+            f"https://api.github.com/repos/{repo}/contributors",
+            params={"per_page": limit_per_repo},
+        )
+        if not isinstance(contributors, list):
+            continue
+        for c in contributors:
+            username = c.get("login")
             if not username or username in seen:
                 continue
             seen.add(username)
-
             profile = get_user_profile(username)
-            if not profile:
+            if not profile or not is_sf_based(profile.get("location") or ""):
                 continue
-
-            location = profile.get("location") or ""
-            if not is_sf_based(location):
-                continue
-
-            top_repos = get_user_repos(username)
-            profile["top_repos"] = top_repos
-            profile["contributes_to_ai"] = True
-            filters = {"sf": True, "ai_contributor": True}
-            profile["signal_score"] = compute_signal_score(profile, filters)
-            results.append(format_profile(profile))
-            print(f"    Found: {username} ({location}) — score {profile['signal_score']}")
-
+            profile["top_repos"] = get_user_repos(username)
+            results.append(format_profile(
+                profile, search_terms=["AI", "machine learning", "LLM"],
+                contributes_to_ai=True,
+            ))
     results.sort(key=lambda x: -x["signal_score"])
     return results
 
 
-def find_trending_repo_authors(days: int = 7, language: str = "Python", limit: int = 50) -> list:
-    """
-    Find authors of trending repos (repos gaining stars fast recently).
-    Uses GitHub search sorted by recently updated + stars.
-    """
-    print(f"Finding trending {language} repos from last {days} days...")
-    from datetime import datetime, timedelta
+def find_trending_repo_authors(days: int = 7, language: str = "Python", limit: int = 50) -> list[dict]:
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-    try:
-        data = _get("https://api.github.com/search/repositories", params={
-            "q": f"language:{language} created:>{since} stars:>50",
-            "sort": "stars",
-            "order": "desc",
-            "per_page": limit,
-        })
-    except Exception as e:
-        print(f"Search failed: {e}")
-        return []
-
-    results = []
-    seen = set()
-    for repo in data.get("items", []):
+    data = _get("https://api.github.com/search/repositories", params={
+        "q": f"language:{language} created:>{since} stars:>50",
+        "sort": "stars", "order": "desc", "per_page": limit,
+    })
+    results: list[dict] = []
+    seen: set[str] = set()
+    for repo in ((data or {}).get("items") or []):
         owner = repo.get("owner", {}).get("login")
         if not owner or owner in seen:
             continue
         seen.add(owner)
-
         profile = get_user_profile(owner)
         if not profile or profile.get("type") == "Organization":
             continue
-
-        top_repos = get_user_repos(owner)
-        profile["top_repos"] = top_repos
-        profile["contributes_to_ai"] = False
-        filters = {"sf": True}
-        profile["signal_score"] = compute_signal_score(profile, filters)
-        result = format_profile(profile)
-        result["trending_repo"] = repo.get("full_name")
-        result["trending_repo_stars"] = repo.get("stargazers_count")
-        results.append(result)
-        print(f"  Found: {owner} — {repo['full_name']} ({repo['stargazers_count']}⭐)")
-
+        profile["top_repos"] = get_user_repos(owner)
+        results.append(format_profile(
+            profile,
+            extra={"trending_repo": repo.get("full_name"), "trending_repo_stars": repo.get("stargazers_count")},
+        ))
     results.sort(key=lambda x: -x["signal_score"])
     return results
 
 
-# --- Export ---
+# ── Export ───────────────────────────────────────────────────────────────────
 
 def export_csv(profiles: list, filename: str = "output/results.csv"):
     os.makedirs("output", exist_ok=True)
     if not profiles:
-        print("No profiles to export.")
         return
-    keys = profiles[0].keys()
     with open(filename, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
+        writer = csv.DictWriter(f, fieldnames=profiles[0].keys())
         writer.writeheader()
         writer.writerows(profiles)
-    print(f"Exported {len(profiles)} profiles to {filename}")
 
 
 def export_json(profiles: list, filename: str = "output/results.json"):
     os.makedirs("output", exist_ok=True)
     with open(filename, "w") as f:
         json.dump(profiles, f, indent=2)
-    print(f"Exported {len(profiles)} profiles to {filename}")
-
-
-# --- Main ---
-
-if __name__ == "__main__":
-    print("M13 GitHub Sourcing Tool")
-    print("=" * 40)
-    print("1. SF-based AI contributors (Use case #1)")
-    print("2. Trending repo authors")
-    choice = input("\nSelect filter (1 or 2): ").strip()
-
-    if choice == "1":
-        results = find_sf_ai_contributors(limit_per_repo=30)
-    elif choice == "2":
-        results = find_trending_repo_authors(days=7)
-    else:
-        print("Invalid choice.")
-        exit()
-
-    print(f"\nFound {len(results)} profiles.")
-    if results:
-        fmt = input("Export as (csv/json/both): ").strip().lower()
-        if fmt in ("csv", "both"):
-            export_csv(results)
-        if fmt in ("json", "both"):
-            export_json(results)
-        print("\nTop 5 by signal score:")
-        for p in results[:5]:
-            print(f"  {p['handle']} ({p['location']}) — score {p['signal_score']} — {p['github_url']}")
