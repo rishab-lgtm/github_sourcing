@@ -27,6 +27,24 @@ def test_oauth_requests_only_identity_scopes():
     assert query["state"][0].split("|")[1] == "search"
 
 
+def test_render_url_is_used_when_explicit_redirect_is_missing():
+    state = AttrDict()
+    with patch.object(streamlit_auth.st, "session_state", state), \
+         patch.dict("os.environ", {
+             "GOOGLE_CLIENT_ID": "client-id",
+             "RENDER_EXTERNAL_URL": "https://github-sourcing.onrender.com/",
+             "ALLOWED_EMAIL_DOMAIN": "m13.co",
+         }, clear=True):
+        url = streamlit_auth.get_google_oauth_url()
+    query = parse_qs(urlparse(url).query)
+    assert query["redirect_uri"] == ["https://github-sourcing.onrender.com"]
+
+
+def test_localhost_is_used_only_outside_render_without_configuration():
+    with patch.dict("os.environ", {}, clear=True):
+        assert streamlit_auth.get_auth_redirect_url() == "http://localhost:8501"
+
+
 def test_callback_rejects_wrong_state_before_network_call():
     state = AttrDict(_oauth_state_nonce="expected")
     with patch.object(streamlit_auth.st, "session_state", state), \

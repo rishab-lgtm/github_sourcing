@@ -144,6 +144,25 @@ def _inject_ls_iframe(js_body: str, allow_top_nav: bool = False):
     )
 
 
+def get_auth_redirect_url() -> str:
+    """Return one canonical OAuth callback URL for local or Render execution."""
+    configured = (os.environ.get("AUTH_REDIRECT_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+
+    # Render supplies these values automatically at runtime. Falling back to
+    # them prevents a missing dashboard variable from sending production users
+    # to localhost and causing Google's redirect_uri_mismatch error.
+    render_url = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
+    if render_url:
+        return render_url.rstrip("/")
+    render_hostname = (os.environ.get("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+    if render_hostname:
+        return f"https://{render_hostname.strip('/')}"
+
+    return "http://localhost:8501"
+
+
 def get_google_oauth_url(prompt: str = None, page: str = None,
                          source: str = None, company: str = None) -> str:
     """Generate the Google OAuth URL.
@@ -152,7 +171,7 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
     state so they survive the OAuth round-trip.
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
-    redirect_uri = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+    redirect_uri = get_auth_redirect_url()
     allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "")
 
     if not client_id:
@@ -199,7 +218,7 @@ def handle_oauth_callback(code: str, state: str = "") -> bool:
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-    redirect_uri = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+    redirect_uri = get_auth_redirect_url()
 
     if not client_id or not client_secret:
         st.session_state.auth_error = "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
@@ -361,7 +380,7 @@ def check_auth() -> bool:
     # Try reading session from localStorage (first page load only)
     if not st.session_state.get("checked_local_storage"):
         st.session_state.checked_local_storage = True
-        redirect_base = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+        redirect_base = get_auth_redirect_url()
         current_page = st.query_params.get("page", "")
         current_source = st.query_params.get("source", "")
         current_company = st.query_params.get("company", "")
