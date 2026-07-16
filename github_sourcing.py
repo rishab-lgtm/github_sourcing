@@ -183,6 +183,41 @@ ROLE_TERMS = {
 
 FILLER_TERMS = {"and", "for", "the", "with", "who", "from", "into", "working"}
 
+# Functional signals are separate from industry/domain signals. A request for a
+# "robotics deployment engineer" should require evidence of both robotics and
+# real-world deployment—not merely return every popular roboticist on GitHub.
+CAPABILITY_EXPANSIONS: dict[str, dict[str, list[str]]] = {
+    "deployment": {
+        "triggers": [
+            "deployment", "deploy", "deployed", "field engineer",
+            "forward deployed", "integration engineer", "implementation engineer",
+            "deployment engineer", "field robotics",
+        ],
+        "terms": [
+            "deployment", "deployed", "deploying", "production", "field robotics",
+            "field testing", "fielded", "robot fleet", "fleet management",
+            "systems integration", "system integration", "commissioning",
+            "hardware software integration", "robot bringup", "bring-up",
+            "customer site", "on-site", "reliability", "operations",
+        ],
+    },
+    "research": {
+        "triggers": ["researcher", "research scientist", "research engineer", "scientist"],
+        "terms": [
+            "research", "researcher", "scientist", "phd", "postdoc", "publication",
+            "laboratory", "lab", "university",
+        ],
+    },
+}
+
+CAPABILITY_DISCOVERY_TERMS = {
+    "deployment": [
+        "deployment", "field testing", "fleet management",
+        "systems integration", "commissioning",
+    ],
+    "research": ["research", "researcher", "research engineer", "scientist", "phd"],
+}
+
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -274,6 +309,9 @@ def expand_query(intent: str) -> list[str]:
         if domain in intent_lower or any(kw.split()[0] in intent_lower for kw in keywords[:3]):
             terms.update(keywords)
 
+    for capability in triggered_capabilities(intent):
+        terms.update(CAPABILITY_EXPANSIONS[capability]["terms"])
+
     for word in re.findall(r'\b\w{3,}\b', intent_lower):
         terms.add(word)
 
@@ -286,6 +324,30 @@ def triggered_domains(intent: str) -> list[str]:
     return [domain for domain in DOMAIN_EXPANSIONS if domain in intent_lower]
 
 
+def triggered_capabilities(intent: str) -> list[str]:
+    """Return explicitly requested work functions such as deployment or research."""
+    intent_lower = intent.lower()
+    return [
+        capability
+        for capability, config in CAPABILITY_EXPANSIONS.items()
+        if any(trigger in intent_lower for trigger in config["triggers"])
+    ]
+
+
+def intent_evidence_groups(intent: str) -> dict[str, list[str]]:
+    """Build independently required evidence groups for a recruiting intent."""
+    groups: dict[str, list[str]] = {}
+    domains = triggered_domains(intent)
+    non_ai_domains = [domain for domain in domains if domain != "ai"]
+    for domain in non_ai_domains or domains:
+        groups[f"domain:{domain}"] = list(dict.fromkeys(
+            [domain, *DOMAIN_EXPANSIONS[domain]]
+        ))
+    for capability in triggered_capabilities(intent):
+        groups[f"capability:{capability}"] = CAPABILITY_EXPANSIONS[capability]["terms"]
+    return groups
+
+
 def required_evidence_terms(intent: str) -> list[str]:
     """
     Terms that must be supported by candidate or source evidence.
@@ -294,12 +356,11 @@ def required_evidence_terms(intent: str) -> list[str]:
     required domain and AI/researcher are role signals. This prevents a popular
     generic AI profile from ranking merely because it has followers or stars.
     """
-    domains = [domain for domain in triggered_domains(intent) if domain != "ai"]
-    if domains:
-        terms: list[str] = []
-        for domain in domains:
-            terms.extend([domain, *DOMAIN_EXPANSIONS[domain]])
-        return list(dict.fromkeys(term.lower() for term in terms))
+    groups = intent_evidence_groups(intent)
+    if groups:
+        return list(dict.fromkeys(
+            term.lower() for terms in groups.values() for term in terms
+        ))
 
     raw = [
         word.lower() for word in re.findall(r'\b[\w-]{3,}\b', intent)
@@ -318,22 +379,61 @@ def discovery_terms(intent: str, limit: int = 6) -> list[str]:
     return list(dict.fromkeys(ordered))[:limit]
 
 
+def discovery_pairs(intent: str, limit: int = 8) -> list[tuple[str, ...]]:
+    """Create domain/function combinations for targeted GitHub searches."""
+    groups = intent_evidence_groups(intent)
+    domain_terms: list[str] = []
+    capability_terms: list[str] = []
+    for label, terms in groups.items():
+        if label.startswith("domain:"):
+            domain_terms.extend(terms)
+        else:
+            capability = label.split(":", 1)[1]
+            capability_terms.extend(CAPABILITY_DISCOVERY_TERMS.get(capability, terms))
+    domain_terms = list(dict.fromkeys(domain_terms))[:4]
+    capability_terms = list(dict.fromkeys(capability_terms))[:5]
+    if domain_terms and capability_terms:
+        pairs = []
+        for offset in range(max(len(domain_terms), len(capability_terms))):
+            for index, domain in enumerate(domain_terms):
+                capability = capability_terms[(index + offset) % len(capability_terms)]
+                pair = (domain, capability)
+                if pair not in pairs:
+                    pairs.append(pair)
+                if len(pairs) >= limit:
+                    return pairs
+        return pairs
+    terms = discovery_terms(intent, limit=limit)
+    return [(term,) for term in terms]
+
+
+def _quote_search_term(term: str) -> str:
+    return f'"{term}"' if " " in term else term
+
+
+def build_github_user_queries(intent: str, location: str = "",
+                              min_followers: int = 0, limit: int = 8) -> list[str]:
+    queries = []
+    for pair in discovery_pairs(intent, limit=limit):
+        parts = [" ".join(_quote_search_term(term) for term in pair)]
+        if location:
+            parts.append(f'location:"{location}"')
+        if min_followers:
+            parts.append(f"followers:>={min_followers}")
+        queries.append(" ".join(parts))
+    return list(dict.fromkeys(queries))
+
+
 def build_github_user_query(intent: str, location: str = "", min_followers: int = 0) -> str:
-    bio_terms = discovery_terms(intent, limit=3)
-    bio_q = " OR ".join(f'"{t}"' if " " in t else t for t in bio_terms)
-    parts = [bio_q]
-    if location:
-        parts.append(f'location:"{location}"')
-    if min_followers:
-        parts.append(f"followers:>={min_followers}")
-    return " ".join(parts)
+    queries = build_github_user_queries(intent, location, min_followers, limit=1)
+    return queries[0] if queries else intent.strip()
 
 
 def build_github_repo_query(intent: str, language: str = "", since_days: int = 0) -> str:
-    terms = discovery_terms(intent, limit=1)
-    query_term = terms[0] if terms else intent.strip()
-    quoted = f'"{query_term}"' if " " in query_term else query_term
-    parts = [f"{quoted} in:name,description,readme"]
+    pair = discovery_pairs(intent, limit=1)
+    query_terms = pair[0] if pair else (intent.strip(),)
+    query_text = " ".join(_quote_search_term(term) for term in query_terms)
+    parts = [f"{query_text} in:name,description,readme"]
     if language:
         parts.append(f"language:{language}")
     if since_days:
@@ -375,8 +475,21 @@ def matched_evidence_terms(intent: str, profile: dict, source_evidence: str = ""
     return [term for term in required_evidence_terms(intent) if term and term in evidence]
 
 
+def matched_intent_dimensions(intent: str, profile: dict,
+                              source_evidence: str = "") -> dict[str, list[str]]:
+    """Return matching terms for every independently required intent dimension."""
+    evidence = _profile_evidence(profile, source_evidence)
+    return {
+        label: [term for term in terms if term and term.lower() in evidence]
+        for label, terms in intent_evidence_groups(intent).items()
+    }
+
+
 def candidate_matches_intent(intent: str, profile: dict, source_evidence: str = "") -> bool:
-    """Reject candidates with no concrete evidence for the requested domain."""
+    """Require concrete evidence for every requested domain and work function."""
+    dimensions = matched_intent_dimensions(intent, profile, source_evidence)
+    if dimensions:
+        return all(matches for matches in dimensions.values())
     return bool(matched_evidence_terms(intent, profile, source_evidence))
 
 
@@ -445,6 +558,7 @@ def founder_signal(bio: str, company: str = "") -> dict:
 def compute_signal_score(
     profile: dict,
     search_terms: list[str] = None,
+    evidence_groups: dict[str, list[str]] = None,
     contributes_to_ai: bool = False,
     is_sf: bool = False,
     source_evidence: str = "",
@@ -486,8 +600,15 @@ def compute_signal_score(
         score += 25
         reasons.append("Contributes to major AI repos")
 
-    if search_terms:
-        evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
+    evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
+    if evidence_groups:
+        for label, terms in evidence_groups.items():
+            matched = [term for term in terms if term.lower() in evidence]
+            if matched:
+                score += 15
+                readable = label.split(":", 1)[-1].replace("_", " ").title()
+                reasons.append(f"{readable} evidence: {', '.join(matched[:3])}")
+    elif search_terms:
         matched = [t for t in search_terms if t.lower() in evidence]
         if matched:
             score += min(len(matched) * 5, 25)
@@ -522,7 +643,7 @@ def compute_signal_score(
 
 def format_profile(profile: dict, search_terms: list[str] = None,
                    contributes_to_ai: bool = False, extra: dict = None,
-                   source_evidence: str = "") -> dict:
+                   source_evidence: str = "", intent: str = "") -> dict:
     top_repos = profile.get("top_repos", [])
     bio = profile.get("bio") or ""
     company = profile.get("company") or ""
@@ -531,6 +652,7 @@ def format_profile(profile: dict, search_terms: list[str] = None,
     is_sf = is_sf_based(location)
     score, reasons = compute_signal_score(
         profile, search_terms=search_terms,
+        evidence_groups=intent_evidence_groups(intent) if intent else None,
         contributes_to_ai=contributes_to_ai, is_sf=is_sf,
         source_evidence=source_evidence,
     )
@@ -569,29 +691,59 @@ def search_by_intent(intent: str, location: str = "",
     if not intent:
         return []
     expanded = expand_query(intent)
-    seen: set[str] = set()
+    accepted: set[str] = set()
+    profile_cache: dict[str, dict] = {}
     candidates: list[dict] = []
 
-    # Strategy 1: user bio search — scale pages with max_results
-    user_pages = max(3, (max_results // 30) + 1)
-    user_q = build_github_user_query(intent, location=location, min_followers=min_followers)
-    log.info("User search: %s", user_q)
-    user_items = _paginate("https://api.github.com/search/users", params={
-        "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
-    }, max_pages=user_pages)
-    for item in user_items:
-        username = (item.get("login") or "").lower()
-        if not username or username in seen:
-            continue
-        seen.add(username)
-        profile = get_user_profile(username)
-        if not profile or profile.get("type") == "Organization":
-            continue
-        profile["top_repos"] = get_user_repos(username)
-        if not candidate_matches_intent(intent, profile):
-            continue
-        candidates.append(format_profile(profile, search_terms=expanded))
-        if len(candidates) >= max_results:
+    def load_profile(username: str) -> dict:
+        username = username.lower()
+        if username not in profile_cache:
+            profile = get_user_profile(username)
+            if profile and profile.get("type") != "Organization":
+                profile["top_repos"] = get_user_repos(username)
+                profile_cache[username] = profile
+            else:
+                profile_cache[username] = {}
+        return profile_cache[username]
+
+    def add_candidate(username: str, source_evidence: str = "",
+                      contributes_to_ai: bool = False, extra: dict = None) -> bool:
+        username = (username or "").lower()
+        if not username or username in accepted:
+            return False
+        profile = load_profile(username)
+        if not profile or not candidate_matches_intent(intent, profile, source_evidence):
+            return False
+        candidates.append(format_profile(
+            profile,
+            search_terms=expanded,
+            intent=intent,
+            contributes_to_ai=contributes_to_ai,
+            source_evidence=source_evidence,
+            extra=extra,
+        ))
+        accepted.add(username)
+        return True
+
+    # Strategy 1: targeted user searches. Cross-domain intents use several
+    # domain/function pairs instead of one broad OR query.
+    user_pages = min(max(1, (max_results // 60) + 1), 3)
+    inspected_limit = min(max(max_results * 3, 60), 180)
+    for user_q in build_github_user_queries(
+        intent, location=location, min_followers=min_followers
+    ):
+        log.info("User search: %s", user_q)
+        user_items = _paginate("https://api.github.com/search/users", params={
+            "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
+        }, max_pages=user_pages)
+        for item in user_items:
+            username = (item.get("login") or "").lower()
+            if username in profile_cache:
+                continue
+            add_candidate(username)
+            if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
+                break
+        if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
             break
 
     # Strategy 2: domain repo search → owners and contributors. Each domain term
@@ -599,9 +751,10 @@ def search_by_intent(intent: str, location: str = "",
     # impossibly restrictive AND query.
     repo_items: list[dict] = []
     repo_seen: set[str] = set()
-    for term in discovery_terms(intent):
-        term_intent = term
-        repo_q = build_github_repo_query(term_intent)
+    for pair in discovery_pairs(intent):
+        pair_intent = " ".join(pair)
+        pair_query = " ".join(_quote_search_term(term) for term in pair)
+        repo_q = f"{pair_query} in:name,description,readme stars:>5"
         log.info("Repo search: %s", repo_q)
         for repo in _paginate("https://api.github.com/search/repositories", params={
             "q": repo_q, "sort": "stars", "order": "desc", "per_page": 10,
@@ -609,36 +762,28 @@ def search_by_intent(intent: str, location: str = "",
             repo_full = repo.get("full_name") or ""
             if repo_full and repo_full not in repo_seen:
                 repo_seen.add(repo_full)
-                repo_items.append(repo)
+                sourced_repo = dict(repo)
+                sourced_repo["_sourcing_query"] = pair_intent
+                repo_items.append(sourced_repo)
         if len(repo_items) >= 30:
             break
 
     for repo in repo_items:
-        source_evidence = _repo_evidence(repo)
-        if not any(term in source_evidence.lower() for term in required_evidence_terms(intent)):
+        source_evidence = f"{_repo_evidence(repo)} {repo.get('_sourcing_query', '')}".strip()
+        source_stub = {"bio": "", "company": "", "name": "", "top_repos": []}
+        source_dimensions = matched_intent_dimensions(intent, source_stub, source_evidence)
+        if source_dimensions and not all(source_dimensions.values()):
             continue
         owner = (repo.get("owner", {}).get("login") or "").lower()
-        if not owner or owner in seen:
-            continue
-        seen.add(owner)
-        profile = get_user_profile(owner)
-        if not profile or profile.get("type") == "Organization":
-            continue
-        profile["top_repos"] = get_user_repos(owner)
-        if not candidate_matches_intent(intent, profile, source_evidence):
-            continue
-        candidates.append(format_profile(
-            profile, search_terms=expanded,
-            source_evidence=source_evidence,
-            extra={
+        source_extra = {
                 "source_repo": repo.get("full_name"),
                 "source_repo_stars": repo.get("stargazers_count", 0),
                 "match_evidence": source_evidence[:300],
-            },
-        ))
+        }
+        add_candidate(owner, source_evidence=source_evidence, extra=source_extra)
 
         # Contributors to a relevant repository are useful even when the owner
-        # is an organization. Relevance still comes from the source repository.
+        # is an organization. Relevance comes from the targeted source repository.
         repo_full = repo.get("full_name") or ""
         contributors = _get(
             f"https://api.github.com/repos/{repo_full}/contributors",
@@ -646,26 +791,16 @@ def search_by_intent(intent: str, location: str = "",
         )
         for contributor in (contributors if isinstance(contributors, list) else []):
             username = (contributor.get("login") or "").lower()
-            if not username or username in seen:
-                continue
-            profile = get_user_profile(username)
-            if not profile or profile.get("type") == "Organization":
-                continue
-            profile["top_repos"] = get_user_repos(username)
-            if not candidate_matches_intent(intent, profile, source_evidence):
-                continue
-            seen.add(username)
-            candidates.append(format_profile(
-                profile,
-                search_terms=expanded,
+            add_candidate(
+                username,
                 contributes_to_ai="ai" in intent.lower(),
                 source_evidence=source_evidence,
-                extra={
-                    "source_repo": repo_full,
-                    "source_repo_stars": repo.get("stargazers_count", 0),
-                    "match_evidence": source_evidence[:300],
-                },
-            ))
+                extra=source_extra,
+            )
+            if len(candidates) >= max_results:
+                break
+        if len(candidates) >= max_results:
+            break
 
     candidates.sort(key=lambda x: -x["signal_score"])
     return candidates[:max_results]
