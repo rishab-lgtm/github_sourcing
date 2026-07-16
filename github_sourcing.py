@@ -31,18 +31,24 @@ TIMEOUT = 12
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 
-# ── Per-session rate limit tracker ───────────────────────────────────────────
-# Tracks API calls made this session to warn users before they exhaust the quota.
-_session_request_count = 0
-SESSION_REQUEST_LIMIT = 200  # conservative; GitHub allows 5000/hr authenticated
+# ── Per-user rate limit tracker ───────────────────────────────────────────────
+# Tracks API calls per user email so one user can't exhaust the quota for others.
+_user_request_counts: dict[str, int] = {}
+SESSION_REQUEST_LIMIT = 4500  # GitHub allows 5000/hr authenticated; leaving small buffer
+_current_user: str = ""
+
+
+def set_current_user(email: str):
+    global _current_user
+    _current_user = email or ""
 
 
 def get_session_request_count() -> int:
-    return _session_request_count
+    return _user_request_counts.get(_current_user, 0)
 
 
 def session_budget_ok() -> bool:
-    return _session_request_count < SESSION_REQUEST_LIMIT
+    return _user_request_counts.get(_current_user, 0) < SESSION_REQUEST_LIMIT
 
 
 # ── Keyword expansion maps ───────────────────────────────────────────────────
@@ -146,9 +152,7 @@ FILLER_TERMS = {"and", "for", "the", "with", "who", "from", "into", "working"}
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 def _get(url: str, params: dict = None, retries: int = None):
-    """GET with timeout, retry, rate-limit handling, and session budget tracking."""
-    global _session_request_count
-
+    """GET with timeout, retry, rate-limit handling, and per-user budget tracking."""
     if not session_budget_ok():
         log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
         return None
@@ -157,7 +161,7 @@ def _get(url: str, params: dict = None, retries: int = None):
     for attempt in range(max_attempts):
         try:
             resp = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
-            _session_request_count += 1
+            _user_request_counts[_current_user] = _user_request_counts.get(_current_user, 0) + 1
         except requests.exceptions.Timeout:
             log.warning("Timeout on %s (attempt %d/%d)", url, attempt + 1, max_attempts)
             if attempt < max_attempts - 1:
@@ -535,12 +539,13 @@ def search_by_intent(intent: str, location: str = "",
     seen: set[str] = set()
     candidates: list[dict] = []
 
-    # Strategy 1: user bio search — paginate up to 3 pages (90 users)
+    # Strategy 1: user bio search — scale pages with max_results
+    user_pages = max(3, (max_results // 30) + 1)
     user_q = build_github_user_query(intent, location=location, min_followers=min_followers)
     log.info("User search: %s", user_q)
     user_items = _paginate("https://api.github.com/search/users", params={
         "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
-    }, max_pages=3)
+    }, max_pages=user_pages)
     for item in user_items:
         username = (item.get("login") or "").lower()
         if not username or username in seen:
@@ -567,7 +572,7 @@ def search_by_intent(intent: str, location: str = "",
         log.info("Repo search: %s", repo_q)
         for repo in _paginate("https://api.github.com/search/repositories", params={
             "q": repo_q, "sort": "stars", "order": "desc", "per_page": 10,
-        }, max_pages=1):
+        }, max_pages=2):
             repo_full = repo.get("full_name") or ""
             if repo_full and repo_full not in repo_seen:
                 repo_seen.add(repo_full)

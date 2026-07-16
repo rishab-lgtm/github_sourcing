@@ -160,8 +160,11 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
 
     # A cryptographically random nonce prevents login CSRF. Routing parameters
     # follow it and are accepted only after the nonce is verified on callback.
+    # Store in both session_state AND the cache_resource store so it survives
+    # the Streamlit session reset that happens on OAuth redirect.
     nonce = st.session_state.get("_oauth_state_nonce") or secrets.token_urlsafe(24)
     st.session_state._oauth_state_nonce = nonce
+    _session_store()["_pending_nonce"] = nonce
     state_parts = [nonce, page or "", source or "", company or ""]
     # Strip trailing empty segments
     while state_parts and state_parts[-1] == "":
@@ -187,7 +190,7 @@ def handle_oauth_callback(code: str, state: str = "") -> bool:
         return False
 
     state_nonce = state.split("|", 1)[0] if state else ""
-    expected_nonce = st.session_state.get("_oauth_state_nonce", "")
+    expected_nonce = st.session_state.get("_oauth_state_nonce") or _session_store().pop("_pending_nonce", "")
     if not state_nonce or not expected_nonce or not hmac.compare_digest(state_nonce, expected_nonce):
         st.session_state.auth_error = "Invalid or expired login request. Please start sign-in again."
         return False

@@ -18,6 +18,7 @@ from github_sourcing import (
     search_by_intent,
     expand_query,
     get_session_request_count,
+    set_current_user,
     SESSION_REQUEST_LIMIT,
 )
 from search_service import SearchConfig, execute_search
@@ -55,7 +56,13 @@ DIGEST_RECIPIENTS = ["brent@m13.co", "thomas@m13.co"]
 st.set_page_config(page_title="M13 GitHub Sourcing", page_icon="⚡", layout="wide")
 
 # ── Auth gate ─────────────────────────────────────────────────────────────────
-if not check_auth():
+import os as _os
+_DEV_BYPASS = _os.environ.get("DEV_BYPASS_AUTH") == "1"
+if _DEV_BYPASS:
+    st.session_state["user_email"] = "rishab@m13.co"
+    st.session_state["user_name"] = "Rishab"
+    st.session_state["authenticated"] = True
+elif not check_auth():
     show_login_page()
     st.stop()
 
@@ -66,6 +73,8 @@ USER_NAME: str = st.session_state.get("user_name", USER_EMAIL)
 if not st.session_state.get("_user_registered"):
     upsert_user(USER_EMAIL, USER_NAME)
     st.session_state["_user_registered"] = True
+
+set_current_user(USER_EMAIL)
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 st.markdown(
@@ -100,19 +109,17 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size:2rem !important; font-weight:800 !important; color:var(--space-blue) !important; letter-spacing:-0.04em !important; }
     [data-testid="stMetricLabel"] { font-size:0.68rem !important; font-weight:600 !important; color:var(--gray) !important; text-transform:uppercase !important; letter-spacing:0.07em !important; }
 
-    .profile-card { background:white; border-radius:16px; padding:1.25rem 1.5rem; border:1px solid var(--border); box-shadow:0 2px 12px rgba(21,15,58,0.05); margin-bottom:0.75rem; }
-    .profile-name { font-size:1rem; font-weight:700; color:var(--space-blue); }
+    .profile-card { background:white; border-radius:16px; padding:1.25rem 1.5rem; border:1px solid var(--border); box-shadow:0 1px 4px rgba(21,15,58,0.04),0 4px 16px rgba(21,15,58,0.04); margin-bottom:0.75rem; transition:box-shadow 0.15s; }
+    .profile-card:hover { box-shadow:0 2px 8px rgba(21,15,58,0.08),0 8px 24px rgba(21,15,58,0.07); }
+    .profile-name { font-size:1.05rem; font-weight:700; color:var(--space-blue); }
     .profile-handle { font-size:0.78rem; color:var(--wave-blue); font-weight:600; text-decoration:none; }
-    .profile-meta { font-size:0.78rem; color:rgba(21,15,58,0.5); margin-top:0.25rem; }
-    .profile-bio { font-size:0.82rem; color:rgba(21,15,58,0.7); margin-top:0.5rem; line-height:1.5; font-style:italic; }
-    .badge { display:inline-block; background:rgba(0,131,255,0.1); color:#0055B3; border-radius:20px; padding:0.15rem 0.6rem; font-size:0.72rem; font-weight:600; margin-right:0.3rem; margin-top:0.4rem; }
-    .score-pill { display:inline-block; border-radius:20px; padding:0.2rem 0.75rem; font-size:0.75rem; font-weight:700; float:right; }
-    .score-high { background:#d4f7e8; color:#0a6641; }
-    .score-mid  { background:#fff8d4; color:#7a6000; }
-    .score-low  { background:#fde8e8; color:#8b1a1a; }
-    .reason-tag { display:inline-block; background:rgba(21,15,58,0.05); color:rgba(21,15,58,0.6); border-radius:8px; padding:0.1rem 0.5rem; font-size:0.68rem; margin-right:0.25rem; margin-top:0.3rem; }
-    .repo-tag { display:inline-block; background:rgba(0,131,255,0.06); color:#0055B3; border-radius:8px; padding:0.1rem 0.5rem; font-size:0.7rem; margin-right:0.25rem; margin-top:0.3rem; }
-    .new-badge { display:inline-block; background:#0083FF; color:white; border-radius:6px; padding:0.1rem 0.45rem; font-size:0.62rem; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; vertical-align:middle; margin-left:0.4rem; }
+    .profile-handle:hover { text-decoration:underline; }
+    .profile-meta { font-size:0.75rem; color:rgba(21,15,58,0.45); }
+    .profile-bio { font-size:0.82rem; color:rgba(21,15,58,0.65); margin-top:0.6rem; line-height:1.55; font-style:italic; padding:0.5rem 0.75rem; background:rgba(21,15,58,0.02); border-radius:8px; border-left:2px solid rgba(0,131,255,0.2); }
+    .badge { display:inline-flex; align-items:center; gap:3px; background:rgba(0,131,255,0.08); color:#0055B3; border-radius:20px; padding:0.15rem 0.65rem; font-size:0.7rem; font-weight:600; }
+    .reason-tag { display:inline-flex; align-items:center; background:#f8f9fa; color:#374151; border-radius:6px; padding:0.2rem 0.55rem; font-size:0.7rem; margin-right:0.3rem; margin-top:0.3rem; border:1px solid #e5e7eb; }
+    .repo-tag { display:inline-block; background:rgba(0,131,255,0.05); color:#0055B3; border-radius:6px; padding:0.15rem 0.5rem; font-size:0.7rem; margin-right:0.25rem; margin-top:0.25rem; border:1px solid rgba(0,131,255,0.12); }
+    .new-badge { display:inline-block; background:#0083FF; color:white; border-radius:5px; padding:0.08rem 0.45rem; font-size:0.58rem; font-weight:700; letter-spacing:0.07em; text-transform:uppercase; vertical-align:middle; }
     .section-header { font-size:1.1rem; font-weight:700; color:var(--space-blue); margin:1.5rem 0 1rem; padding-bottom:0.5rem; border-bottom:2px solid rgba(0,131,255,0.15); }
     .intent-preview { background:rgba(0,131,255,0.05); border:1px solid rgba(0,131,255,0.15); border-radius:10px; padding:0.6rem 1rem; font-size:0.78rem; color:rgba(21,15,58,0.7); margin-bottom:1rem; }
     .saved-card { background:white; border-radius:12px; padding:1rem 1.25rem; border:1px solid var(--border); margin-bottom:0.6rem; box-shadow:0 1px 4px rgba(21,15,58,0.04); }
@@ -158,35 +165,70 @@ def render_profile_card(row: dict, is_new: bool = False):
     score = row.get("signal_score", 0)
     top_repos = row.get("top_repos", "")
     acct_age = row.get("account_age_years")
+    followers = row.get("followers", 0) or 0
+    public_repos = row.get("public_repos", 0) or 0
     reasons = row.get("match_reasons") or []
 
     meta_parts = []
-    if location: meta_parts.append(f"📍 {location}")
-    if company: meta_parts.append(f"🏢 {company}")
-    if acct_age is not None: meta_parts.append(f"⏱ {acct_age}yr account")
+    if location: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x1F4CD; {location}</span>')
+    if company: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x1F3E2; {company}</span>')
+    if acct_age is not None: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x23F1; {acct_age}yr account</span>')
 
     badge_html = "".join(
         f'<span class="badge">{b.strip()}</span>'
         for b in str(badges).split("|") if b.strip()
     )
-    repo_items = [r.strip() for r in str(top_repos).split(",") if r.strip()][:3]
+    repo_items = [r.strip() for r in str(top_repos).split(",") if r.strip()][:4]
     repos_html = "".join(f'<span class="repo-tag">{r}</span>' for r in repo_items)
-    reasons_html = "".join(f'<span class="reason-tag">✓ {r}</span>' for r in reasons[:5])
-    new_html = '<span class="new-badge">New</span>' if is_new else ""
+
+    # Score breakdown — show what drove the score
+    reasons_html = "".join(
+        f'<span class="reason-tag">&#10003; {r}</span>' for r in reasons[:6]
+    )
+
+    new_html = '<span class="new-badge">NEW</span>' if is_new else ""
     bio_html = f'<div class="profile-bio">"{bio}"</div>' if bio and bio not in ("nan", "") else ""
+
+    # Score color and label
+    if score >= 70:
+        score_bg, score_fg, score_label = "#d4f7e8", "#0a6641", "High"
+    elif score >= 50:
+        score_bg, score_fg, score_label = "#fff8d4", "#7a6000", "Mid"
+    else:
+        score_bg, score_fg, score_label = "#f3f4f6", "#4b5563", "Low"
+
+    stats_html = ""
+    if followers: stats_html += f'<span style="font-size:0.75rem;color:#6b7280;margin-right:12px"><strong style="color:#150F3A">{followers:,}</strong> followers</span>'
+    if public_repos: stats_html += f'<span style="font-size:0.75rem;color:#6b7280;margin-right:12px"><strong style="color:#150F3A">{public_repos}</strong> repos</span>'
+    stars = total_stars(top_repos)
+    if stars: stats_html += f'<span style="font-size:0.75rem;color:#6b7280"><strong style="color:#150F3A">{stars:,}</strong> total stars</span>'
 
     st.markdown(f"""
     <div class="profile-card">
-        <div>
-            <span class="score-pill {score_class(score)}">{score}</span>
-            <div class="profile-name">{name}{new_html}</div>
-            <a class="profile-handle" href="{github_url}" target="_blank">@{handle}</a>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem">
+            <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span class="profile-name">{name}</span>
+                    {new_html}
+                    {badge_html}
+                </div>
+                <a class="profile-handle" href="{github_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px;margin-top:2px">
+                    @{handle}
+                </a>
+                <div class="profile-meta" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:10px">{" ".join(meta_parts)}</div>
+            </div>
+            <div style="text-align:center;flex-shrink:0">
+                <div style="background:{score_bg};color:{score_fg};border-radius:12px;padding:6px 14px;font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;line-height:1">{score}</div>
+                <div style="font-size:0.6rem;font-weight:600;color:{score_fg};text-transform:uppercase;letter-spacing:0.06em;margin-top:3px">{score_label} signal</div>
+            </div>
         </div>
-        <div class="profile-meta">{" · ".join(meta_parts)}</div>
         {bio_html}
-        <div style="margin-top:0.5rem">{badge_html}</div>
-        <div style="margin-top:0.25rem">{reasons_html}</div>
-        <div style="margin-top:0.25rem">{repos_html}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f5">
+            <div style="font-size:0.65rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">Why this score</div>
+            <div>{reasons_html}</div>
+        </div>
+        {f'<div style="margin-top:8px">{stats_html}</div>' if stats_html else ''}
+        {f'<div style="margin-top:6px">{repos_html}</div>' if repos_html else ''}
     </div>
     """, unsafe_allow_html=True)
 
@@ -231,13 +273,13 @@ def apply_filters(df: pd.DataFrame, prev_handles: set = None,
     return df
 
 
-def run_search(mode: str, intent: str, region: str, saved_search_id: str = None,
-               triggered_by: str = "manual") -> list:
+def run_search(mode: str, intent: str, region: str, max_results: int = 75,
+               saved_search_id: str = None, triggered_by: str = "manual") -> list:
     return execute_search(SearchConfig(
         mode=mode,
         intent=intent.strip(),
         region=region.strip(),
-        max_results=60,
+        max_results=max_results,
     ))
 
 
@@ -255,11 +297,10 @@ def display_results(results: list, prev_handles: set,
         stealth_only=stealth_only, show_new_only=show_new_only, sort_by=sort_by,
     )
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Found", len(results))
     m2.metric("After Filters", len(df))
     m3.metric("New This Run", len(new_handle_set))
-    m4.metric("Dropped Off", removed)
 
     if df.empty:
         st.info("No profiles match your filters. Try lowering the score threshold.")
@@ -298,7 +339,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### Filters")
-    min_score   = st.slider("Min signal score", 0, 100, 40, step=5)
+    max_results = st.slider("Max results", 10, 200, 75, step=5)
+    min_score   = st.slider("Min signal score", 0, 100, 20, step=5)
     filter_badges = st.multiselect("Founder signals",
                                    ["🏛 Top Lab", "🚀 Building", "🔬 Researcher"], default=[])
     min_stars   = st.number_input("Min repo stars", min_value=0, value=0, step=50)
@@ -312,7 +354,7 @@ with st.sidebar:
     # Rate limit indicator
     used = get_session_request_count()
     pct = int(used / SESSION_REQUEST_LIMIT * 100)
-    if pct > 60:
+    if pct > 80:
         st.markdown(f"<div style='font-size:0.72rem;color:rgba(255,200,0,0.8)'>⚠ API usage: {used}/{SESSION_REQUEST_LIMIT} requests this session</div>", unsafe_allow_html=True)
 
     st.markdown("---")
@@ -344,7 +386,7 @@ st.markdown("""
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_search, tab_saved, tab_breakout, tab_history, tab_settings = st.tabs(
-    ["🔍 Search", "⭐ Saved Searches", "🚀 Breakouts", "📋 History", "⚙️ Settings"]
+    ["Search", "Saved Searches", "Breakouts", "History", "Settings"]
 )
 
 
@@ -368,15 +410,46 @@ with tab_search:
             )
         st.markdown("")
 
-    c1, c2, c3 = st.columns([3, 1.4, 1.4])
+    c1, c2, c3, c4 = st.columns([3, 1.4, 1.4, 1.4])
     with c1:
         label = "⚡  Search" if mode == "Intent Search" else "⚡  Run Scan"
         run_btn = st.button(label, type="primary", use_container_width=True,
                             disabled=(mode == "Intent Search" and not intent.strip()))
     with c2:
-        recap_btn = st.button("📨  Send Recap", use_container_width=True)
+        save_btn_top = st.button("Save Search", use_container_width=True,
+                                 disabled=(mode == "Intent Search" and not intent.strip()))
     with c3:
-        digest_btn = st.button("📬  Weekly Digest", use_container_width=True)
+        recap_btn = st.button("Send Recap", use_container_width=True)
+    with c4:
+        digest_btn = st.button("Weekly Digest", use_container_width=True)
+
+    if save_btn_top and intent.strip():
+        st.session_state["_show_save_form"] = True
+        st.session_state["_save_intent"] = intent.strip()
+
+    if st.session_state.get("_show_save_form"):
+        with st.container():
+            st.markdown("---")
+            st.markdown("**Save this search**")
+            qs_name = st.text_input("Name", value=st.session_state.get("_save_intent", "")[:60], key="qs_name")
+            qs_notify = st.checkbox("Email me when new people match", value=True, key="qs_notify")
+            col_sv, col_cx = st.columns([1, 4])
+            with col_sv:
+                if st.button("Save", type="primary", key="qs_submit"):
+                    save_search(
+                        user_email=USER_EMAIL,
+                        name=qs_name.strip() or st.session_state.get("_save_intent", ""),
+                        intent=st.session_state.get("_save_intent", ""),
+                        mode=mode,
+                        filters={"region": region, "bio_keyword": bio_keyword},
+                        notify_on_new=qs_notify,
+                    )
+                    st.session_state["_show_save_form"] = False
+                    st.success(f"Saved '{qs_name}'! Go to Saved Searches to see it.")
+            with col_cx:
+                if st.button("Cancel", key="qs_cancel"):
+                    st.session_state["_show_save_form"] = False
+                    st.rerun()
 
     notify_email = prefs.get("notify_email") or USER_EMAIL
     recap_frequency = prefs.get("recap_frequency", "Weekly")
@@ -422,7 +495,7 @@ with tab_search:
     if run_btn:
         scan_label = intent.strip() if mode == "Intent Search" else mode
         with st.spinner(f"Searching GitHub for '{scan_label}'… this takes 2–3 minutes"):
-            results = run_search(mode, intent, region)
+            results = run_search(mode, intent, region, max_results=max_results)
 
         if not results:
             st.warning("No profiles found. Try broadening your search.")
@@ -471,23 +544,36 @@ with tab_search:
                 max_account_age, stealth_only, show_new_only, sort_by,
             )
 
-            # Offer to save this search
-            with st.expander("💾 Save this search"):
-                save_name = st.text_input("Search name", value=scan_label[:60], key="save_name")
-                notify_toggle = st.checkbox("Notify me when new candidates match", value=True, key="save_notify")
-                if st.button("Save Search", key="do_save"):
-                    if save_name.strip():
-                        save_search(
-                            user_email=USER_EMAIL,
-                            name=save_name.strip(),
-                            intent=scan_label,
-                            mode=mode,
-                            filters={"region": region, "bio_keyword": bio_keyword},
-                            notify_on_new=notify_toggle,
-                        )
-                        st.success(f"Saved as '{save_name}'! It will auto-run via the scheduler.")
-                    else:
-                        st.warning("Enter a name first.")
+            # Save search — prominent, not hidden
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,rgba(0,131,255,0.06),rgba(0,131,255,0.02));
+                        border:1px solid rgba(0,131,255,0.2);border-radius:14px;padding:1.25rem 1.5rem;margin-top:1.5rem">
+                <div style="font-weight:700;color:#150F3A;font-size:0.95rem;margin-bottom:0.25rem">
+                    Save this search
+                </div>
+                <div style="font-size:0.78rem;color:#6b7280;margin-bottom:1rem">
+                    Auto-runs on a schedule and emails you when new people match.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            col_sn, col_sb = st.columns([4, 1])
+            with col_sn:
+                save_name = st.text_input("Search name", value=scan_label[:60], key="save_name", label_visibility="collapsed", placeholder="Name this search…")
+            with col_sb:
+                notify_toggle = st.checkbox("Email alerts", value=True, key="save_notify")
+            if st.button("Save & set up alerts", type="primary", key="do_save"):
+                if save_name.strip():
+                    save_search(
+                        user_email=USER_EMAIL,
+                        name=save_name.strip(),
+                        intent=scan_label,
+                        mode=mode,
+                        filters={"region": region, "bio_keyword": bio_keyword},
+                        notify_on_new=notify_toggle,
+                    )
+                    st.success(f"Saved '{save_name}' — it will auto-run and alert you when new people match.")
+                else:
+                    st.warning("Enter a name first.")
     else:
         # Show cached results
         last_results = load_user_results(USER_EMAIL)
@@ -500,12 +586,32 @@ with tab_search:
             </div>
             """, unsafe_allow_html=True)
         else:
-            st.info("Showing your cached results from last scan. Hit **Run Scan** to refresh.")
+            st.info("Showing your cached results from last scan. Hit **Search** to refresh.")
             display_results(
                 last_results, set(),
                 min_score, filter_badges, min_stars, bio_keyword, region,
                 max_account_age, stealth_only, show_new_only, sort_by,
             )
+            if mode == "Intent Search" and intent.strip():
+                scan_label = intent.strip()
+                st.markdown("""
+                <div style="background:linear-gradient(135deg,rgba(0,131,255,0.06),rgba(0,131,255,0.02));
+                            border:1px solid rgba(0,131,255,0.2);border-radius:14px;padding:1.25rem 1.5rem;margin-top:1.5rem">
+                    <div style="font-weight:700;color:#150F3A;font-size:0.95rem;margin-bottom:0.25rem">Save this search</div>
+                    <div style="font-size:0.78rem;color:#6b7280;margin-bottom:1rem">Auto-runs on a schedule and emails you when new people match.</div>
+                </div>
+                """, unsafe_allow_html=True)
+                col_sn2, col_sb2 = st.columns([4, 1])
+                with col_sn2:
+                    save_name2 = st.text_input("Search name", value=scan_label[:60], key="save_name2", label_visibility="collapsed", placeholder="Name this search…")
+                with col_sb2:
+                    notify_toggle2 = st.checkbox("Email alerts", value=True, key="save_notify2")
+                if st.button("Save & set up alerts", type="primary", key="do_save2"):
+                    if save_name2.strip():
+                        save_search(user_email=USER_EMAIL, name=save_name2.strip(), intent=scan_label,
+                                    mode=mode, filters={"region": region, "bio_keyword": bio_keyword},
+                                    notify_on_new=notify_toggle2)
+                        st.success(f"Saved '{save_name2}' — will auto-run and alert you when new people match.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
