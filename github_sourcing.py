@@ -12,6 +12,8 @@ import time
 import json
 import csv
 import logging
+import threading
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -32,23 +34,56 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 
 # ── Per-user rate limit tracker ───────────────────────────────────────────────
-# Tracks API calls per user email so one user can't exhaust the quota for others.
-_user_request_counts: dict[str, int] = {}
+# ContextVar keeps the active user isolated across Streamlit's concurrent session
+# threads. Counters are protected by a lock and reset every hour to match GitHub's
+# authenticated API rate-limit window.
+_current_user: ContextVar[str] = ContextVar("github_sourcing_user", default="anonymous")
+_user_request_windows: dict[str, tuple[float, int]] = {}
+_usage_lock = threading.Lock()
+_REQUEST_WINDOW_SECONDS = 60 * 60
 SESSION_REQUEST_LIMIT = 4500  # GitHub allows 5000/hr authenticated; leaving small buffer
-_current_user: str = ""
 
 
 def set_current_user(email: str):
-    global _current_user
-    _current_user = email or ""
+    """Bind API usage to the current Streamlit session or scheduler job."""
+    return _current_user.set((email or "anonymous").strip().lower())
+
+
+def _usage_key() -> str:
+    return _current_user.get()
+
+
+def _request_count(user: str, now=None) -> int:
+    now = time.time() if now is None else now
+    with _usage_lock:
+        started_at, count = _user_request_windows.get(user, (now, 0))
+        if now - started_at >= _REQUEST_WINDOW_SECONDS:
+            _user_request_windows[user] = (now, 0)
+            return 0
+        return count
+
+
+def _consume_request_budget() -> bool:
+    """Atomically reserve one request from the current user's hourly budget."""
+    user = _usage_key()
+    now = time.time()
+    with _usage_lock:
+        started_at, count = _user_request_windows.get(user, (now, 0))
+        if now - started_at >= _REQUEST_WINDOW_SECONDS:
+            started_at, count = now, 0
+        if count >= SESSION_REQUEST_LIMIT:
+            _user_request_windows[user] = (started_at, count)
+            return False
+        _user_request_windows[user] = (started_at, count + 1)
+        return True
 
 
 def get_session_request_count() -> int:
-    return _user_request_counts.get(_current_user, 0)
+    return _request_count(_usage_key())
 
 
 def session_budget_ok() -> bool:
-    return _user_request_counts.get(_current_user, 0) < SESSION_REQUEST_LIMIT
+    return get_session_request_count() < SESSION_REQUEST_LIMIT
 
 
 # ── Keyword expansion maps ───────────────────────────────────────────────────
@@ -153,15 +188,13 @@ FILLER_TERMS = {"and", "for", "the", "with", "who", "from", "into", "working"}
 
 def _get(url: str, params: dict = None, retries: int = None):
     """GET with timeout, retry, rate-limit handling, and per-user budget tracking."""
-    if not session_budget_ok():
-        log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
-        return None
-
     max_attempts = retries if retries is not None else MAX_RETRIES
     for attempt in range(max_attempts):
+        if not _consume_request_budget():
+            log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
+            return None
         try:
             resp = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
-            _user_request_counts[_current_user] = _user_request_counts.get(_current_user, 0) + 1
         except requests.exceptions.Timeout:
             log.warning("Timeout on %s (attempt %d/%d)", url, attempt + 1, max_attempts)
             if attempt < max_attempts - 1:
