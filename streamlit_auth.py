@@ -7,6 +7,7 @@ Uses direct Google OAuth 2.0 with persistent sessions via browser localStorage.
 import html as html_mod
 import os
 import base64
+import hashlib
 import secrets
 import time
 import hmac
@@ -21,6 +22,9 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 SESSION_TTL = 30 * 24 * 60 * 60  # 30 days
 OAUTH_STATE_TTL = 10 * 60  # OAuth round trips should complete within 10 minutes
+EMAIL_CODE_TTL = 10 * 60
+EMAIL_CODE_COOLDOWN = 60
+EMAIL_CODE_MAX_ATTEMPTS = 5
 
 # App state keys to persist across session reconnects.
 # Auth keys and non-serializable objects (uploaded_files) are excluded.
@@ -431,7 +435,97 @@ def logout():
     st.session_state.clear_local_storage = True
 
 
-def show_login_page():
+def _login_code_key(email: str) -> str:
+    return f"email_login:{email}"
+
+
+def _normalize_allowed_email(email: str) -> str:
+    normalized = (email or "").strip().lower()
+    allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "m13.co").strip().lower()
+    if normalized.count("@") != 1 or not normalized.endswith(f"@{allowed_domain}"):
+        return ""
+    return normalized
+
+
+def request_email_login_code(email: str) -> tuple[bool, str]:
+    """Send a short-lived login code to an approved M13 email address."""
+    normalized = _normalize_allowed_email(email)
+    if not normalized:
+        return False, "Enter a valid @m13.co email address."
+
+    store = _session_store()
+    key = _login_code_key(normalized)
+    existing = store.get(key) or {}
+    now = time.time()
+    if now - existing.get("requested_at", 0) < EMAIL_CODE_COOLDOWN:
+        return False, "A code was just sent. Please wait one minute before requesting another."
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    salt = secrets.token_hex(16)
+    code_hash = hashlib.sha256(f"{salt}:{code}".encode()).hexdigest()
+    store[key] = {
+        "salt": salt,
+        "code_hash": code_hash,
+        "requested_at": now,
+        "expires_at": now + EMAIL_CODE_TTL,
+        "attempts": 0,
+    }
+
+    from notifications import send_email
+    sent = send_email(
+        normalized,
+        "Your M13 GitHub Sourcing sign-in code",
+        f"""
+        <div style="font-family:Arial,sans-serif;padding:24px;color:#150F3A">
+          <h2 style="margin:0 0 12px">GitHub Sourcing sign-in</h2>
+          <p>Your one-time code is:</p>
+          <div style="font-size:32px;font-weight:700;letter-spacing:8px;margin:20px 0">{code}</div>
+          <p style="color:#737368">This code expires in 10 minutes. If you did not request it, ignore this email.</p>
+        </div>
+        """,
+    )
+    if not sent:
+        store.pop(key, None)
+        return False, "We could not send the code. Please try again."
+    return True, "Code sent. Check your M13 email."
+
+
+def verify_email_login_code(email: str, code: str) -> tuple[bool, str]:
+    """Verify a one-time code and establish the normal persistent app session."""
+    normalized = _normalize_allowed_email(email)
+    entered = (code or "").strip()
+    if not normalized or not entered:
+        return False, "Enter the email and six-digit code."
+
+    store = _session_store()
+    key = _login_code_key(normalized)
+    record = store.get(key)
+    if not record or time.time() > record.get("expires_at", 0):
+        store.pop(key, None)
+        return False, "That code expired. Request a new one."
+    if record.get("attempts", 0) >= EMAIL_CODE_MAX_ATTEMPTS:
+        store.pop(key, None)
+        return False, "Too many attempts. Request a new code."
+
+    entered_hash = hashlib.sha256(f"{record['salt']}:{entered}".encode()).hexdigest()
+    if not hmac.compare_digest(entered_hash, record["code_hash"]):
+        record["attempts"] = record.get("attempts", 0) + 1
+        return False, "That code is incorrect."
+
+    store.pop(key, None)
+    name = normalized.split("@", 1)[0].replace(".", " ").title()
+    session_id = _create_session(normalized, name)
+    st.session_state.authenticated = True
+    st.session_state.user_email = normalized
+    st.session_state.user_name = name
+    st.session_state.auth_error = None
+    st.session_state.session_id = session_id
+    st.session_state.pending_session_store = True
+    st.session_state.pop("otp_email", None)
+    return True, "Signed in."
+
+
+def _show_google_login_page():
     """Render the styled login page with animated gradient background and glass-morphism card."""
     allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "")
     auth_error = st.session_state.get("auth_error")
@@ -613,3 +707,63 @@ def show_login_page():
         f'scrolling="no"></iframe>',
         unsafe_allow_html=True,
     )
+
+
+def show_login_page():
+    """Render passwordless M13 email authentication without external OAuth setup."""
+    allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "m13.co")
+    st.markdown("""
+    <style>
+      header[data-testid="stHeader"], footer, #MainMenu,
+      div[data-testid="stDecoration"], div[data-testid="stToolbar"] { display:none !important; }
+      .stApp { background:linear-gradient(145deg,#e8eef8 0%,#f5f7fc 50%,#dde6f5 100%) !important; }
+      .block-container { max-width:720px !important; padding-top:10vh !important; }
+      [data-testid="stVerticalBlockBorderWrapper"] {
+        background:#fff; border:1px solid #e0e6f0 !important; border-radius:20px !important;
+        box-shadow:0 8px 40px rgba(21,15,58,.08); padding:1.25rem !important;
+      }
+      .m13-login-title { text-align:center; color:#150F3A; }
+      .m13-login-title span { display:inline-block;background:#0083ff;color:white;font-weight:800;
+        font-size:.7rem;letter-spacing:.1em;padding:5px 10px;border-radius:6px;margin-bottom:18px; }
+      .m13-login-title h1 { margin:0;font-size:1.8rem; }
+      .m13-login-title p { color:#737368;margin:.5rem 0 1.5rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(
+            '<div class="m13-login-title"><span>M13</span><h1>GitHub Sourcing</h1>'
+            '<p>Sign in with a secure one-time email code</p></div>',
+            unsafe_allow_html=True,
+        )
+        email = st.text_input(
+            "M13 email",
+            value=st.session_state.get("otp_email", ""),
+            placeholder=f"you@{allowed_domain}",
+            disabled=bool(st.session_state.get("otp_email")),
+        )
+
+        if not st.session_state.get("otp_email"):
+            if st.button("Email me a sign-in code", type="primary", use_container_width=True):
+                sent, message = request_email_login_code(email)
+                if sent:
+                    st.session_state.otp_email = email.strip().lower()
+                    st.session_state.auth_error = None
+                    st.rerun()
+                st.error(message)
+        else:
+            st.success(f"Code sent to {st.session_state.otp_email}")
+            code = st.text_input(
+                "Six-digit code", type="password", max_chars=6,
+                placeholder="000000", autocomplete="one-time-code",
+            )
+            if st.button("Verify and sign in", type="primary", use_container_width=True):
+                verified, message = verify_email_login_code(st.session_state.otp_email, code)
+                if verified:
+                    st.rerun()
+                st.error(message)
+            if st.button("Use a different email", use_container_width=True):
+                st.session_state.pop("otp_email", None)
+                st.rerun()
+
+        st.caption(f"Restricted to @{allowed_domain} accounts. Codes expire after 10 minutes.")

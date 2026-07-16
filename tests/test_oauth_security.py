@@ -88,3 +88,43 @@ def test_oauth_state_expires_after_ten_minutes():
         streamlit_auth._store_oauth_nonce("short-lived")
     with patch("streamlit_auth.time.time", return_value=1000 + streamlit_auth.OAUTH_STATE_TTL + 1):
         assert streamlit_auth._consume_oauth_nonce("short-lived") is False
+
+
+def test_email_login_rejects_non_m13_recipient():
+    with patch("notifications.send_email") as send:
+        ok, message = streamlit_auth.request_email_login_code("person@gmail.com")
+    assert ok is False
+    assert "@m13.co" in message
+    send.assert_not_called()
+
+
+def test_email_login_code_is_one_time_and_creates_session():
+    streamlit_auth._session_store().clear()
+    state = AttrDict()
+    with patch.object(streamlit_auth.st, "session_state", state), \
+         patch("notifications.send_email", return_value=True) as send, \
+         patch.object(streamlit_auth.secrets, "randbelow", return_value=123456), \
+         patch.dict("os.environ", {"ALLOWED_EMAIL_DOMAIN": "m13.co"}, clear=False):
+        sent, _ = streamlit_auth.request_email_login_code("rishab@m13.co")
+        verified, _ = streamlit_auth.verify_email_login_code("rishab@m13.co", "123456")
+        replayed, _ = streamlit_auth.verify_email_login_code("rishab@m13.co", "123456")
+
+    assert sent is True
+    assert verified is True
+    assert replayed is False
+    assert state.authenticated is True
+    assert state.user_email == "rishab@m13.co"
+    assert state.session_id
+    send.assert_called_once()
+
+
+def test_email_login_rejects_wrong_code():
+    streamlit_auth._session_store().clear()
+    state = AttrDict()
+    with patch.object(streamlit_auth.st, "session_state", state), \
+         patch("notifications.send_email", return_value=True), \
+         patch.object(streamlit_auth.secrets, "randbelow", return_value=123456):
+        streamlit_auth.request_email_login_code("rishab@m13.co")
+        verified, message = streamlit_auth.verify_email_login_code("rishab@m13.co", "654321")
+    assert verified is False
+    assert "incorrect" in message
