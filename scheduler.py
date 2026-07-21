@@ -42,6 +42,7 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
         audit,
     )
     from search_service import SearchConfig, execute_search
+    from github_sourcing import set_current_user
     from notifications import send_new_profiles_email
 
     send_fn = send_fn or send_new_profiles_email
@@ -53,6 +54,7 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
     filters = search.get("filters") or {}
 
     log.info("Running saved search '%s' for %s (mode=%s)", search["name"], user_email, mode)
+    set_current_user(user_email)
     results = execute_search(SearchConfig.from_saved_search(search))
     if not results:
         return {"result_count": 0, "new_count": 0, "notified": False}

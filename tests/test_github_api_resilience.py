@@ -6,6 +6,7 @@ Zach: "Smoke-test GitHub API failures, rate limits, missing tokens, empty result
 import pytest
 import sys
 import os
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -129,6 +130,36 @@ class TestSessionBudget:
         count = github_sourcing.get_session_request_count()
         assert isinstance(count, int)
         assert count >= 0
+
+    def test_usage_is_isolated_between_concurrent_users(self):
+        github_sourcing._user_request_windows.clear()
+
+        def consume_for(email, amount):
+            github_sourcing.set_current_user(email)
+            for _ in range(amount):
+                assert github_sourcing._consume_request_budget()
+            return github_sourcing.get_session_request_count()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            alice = pool.submit(consume_for, "alice@m13.co", 3)
+            bob = pool.submit(consume_for, "bob@m13.co", 5)
+
+        assert alice.result() == 3
+        assert bob.result() == 5
+
+        github_sourcing.set_current_user("alice@m13.co")
+        assert github_sourcing.get_session_request_count() == 3
+        github_sourcing.set_current_user("bob@m13.co")
+        assert github_sourcing.get_session_request_count() == 5
+
+    def test_usage_window_resets_after_one_hour(self):
+        github_sourcing._user_request_windows.clear()
+        github_sourcing.set_current_user("alice@m13.co")
+        with patch("github_sourcing.time.time", return_value=1000):
+            assert github_sourcing._consume_request_budget()
+            assert github_sourcing.get_session_request_count() == 1
+        with patch("github_sourcing.time.time", return_value=1000 + 3600):
+            assert github_sourcing.get_session_request_count() == 0
 
 
 class TestSwallowedExceptions:

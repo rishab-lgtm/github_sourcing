@@ -20,6 +20,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 SESSION_TTL = 30 * 24 * 60 * 60  # 30 days
+OAUTH_STATE_TTL = 10 * 60  # OAuth round trips should complete within 10 minutes
 
 # App state keys to persist across session reconnects.
 # Auth keys and non-serializable objects (uploaded_files) are excluded.
@@ -71,6 +72,21 @@ def _validate_session(session_id: str):
 def _destroy_session(session_id: str):
     """Remove a session from the server-side store."""
     _session_store().pop(session_id, None)
+
+
+def _oauth_state_key(nonce: str) -> str:
+    return f"oauth_state:{nonce}"
+
+
+def _store_oauth_nonce(nonce: str):
+    """Persist a unique, short-lived OAuth state without sharing one global slot."""
+    _session_store()[_oauth_state_key(nonce)] = time.time()
+
+
+def _consume_oauth_nonce(nonce: str) -> bool:
+    """Validate and atomically consume an OAuth state nonce exactly once."""
+    created_at = _session_store().pop(_oauth_state_key(nonce), None)
+    return created_at is not None and time.time() - created_at <= OAUTH_STATE_TTL
 
 
 def save_app_state():
@@ -128,6 +144,25 @@ def _inject_ls_iframe(js_body: str, allow_top_nav: bool = False):
     )
 
 
+def get_auth_redirect_url() -> str:
+    """Return one canonical OAuth callback URL for local or Render execution."""
+    configured = (os.environ.get("AUTH_REDIRECT_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+
+    # Render supplies these values automatically at runtime. Falling back to
+    # them prevents a missing dashboard variable from sending production users
+    # to localhost and causing Google's redirect_uri_mismatch error.
+    render_url = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
+    if render_url:
+        return render_url.rstrip("/")
+    render_hostname = (os.environ.get("RENDER_EXTERNAL_HOSTNAME") or "").strip()
+    if render_hostname:
+        return f"https://{render_hostname.strip('/')}"
+
+    return "http://localhost:8501"
+
+
 def get_google_oauth_url(prompt: str = None, page: str = None,
                          source: str = None, company: str = None) -> str:
     """Generate the Google OAuth URL.
@@ -136,7 +171,7 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
     state so they survive the OAuth round-trip.
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
-    redirect_uri = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+    redirect_uri = get_auth_redirect_url()
     allowed_domain = os.environ.get("ALLOWED_EMAIL_DOMAIN", "")
 
     if not client_id:
@@ -164,7 +199,7 @@ def get_google_oauth_url(prompt: str = None, page: str = None,
     # the Streamlit session reset that happens on OAuth redirect.
     nonce = st.session_state.get("_oauth_state_nonce") or secrets.token_urlsafe(24)
     st.session_state._oauth_state_nonce = nonce
-    _session_store()["_pending_nonce"] = nonce
+    _store_oauth_nonce(nonce)
     state_parts = [nonce, page or "", source or "", company or ""]
     # Strip trailing empty segments
     while state_parts and state_parts[-1] == "":
@@ -183,15 +218,17 @@ def handle_oauth_callback(code: str, state: str = "") -> bool:
     """
     client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-    redirect_uri = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+    redirect_uri = get_auth_redirect_url()
 
     if not client_id or not client_secret:
         st.session_state.auth_error = "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
         return False
 
     state_nonce = state.split("|", 1)[0] if state else ""
-    expected_nonce = st.session_state.get("_oauth_state_nonce") or _session_store().pop("_pending_nonce", "")
-    if not state_nonce or not expected_nonce or not hmac.compare_digest(state_nonce, expected_nonce):
+    expected_nonce = st.session_state.get("_oauth_state_nonce", "")
+    session_state_matches = not expected_nonce or hmac.compare_digest(state_nonce, expected_nonce)
+    cached_state_matches = bool(state_nonce) and _consume_oauth_nonce(state_nonce)
+    if not session_state_matches or not cached_state_matches:
         st.session_state.auth_error = "Invalid or expired login request. Please start sign-in again."
         return False
 
@@ -343,7 +380,7 @@ def check_auth() -> bool:
     # Try reading session from localStorage (first page load only)
     if not st.session_state.get("checked_local_storage"):
         st.session_state.checked_local_storage = True
-        redirect_base = os.environ.get("AUTH_REDIRECT_URL", "http://localhost:8501")
+        redirect_base = get_auth_redirect_url()
         current_page = st.query_params.get("page", "")
         current_source = st.query_params.get("source", "")
         current_company = st.query_params.get("company", "")
