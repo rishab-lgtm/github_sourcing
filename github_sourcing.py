@@ -322,10 +322,14 @@ CAPABILITY_DISCOVERY_TERMS = {
 def _get(url: str, params: dict = None, retries: int = None):
     """GET with timeout, retry, rate-limit handling, and per-user budget tracking."""
     max_attempts = retries if retries is not None else MAX_RETRIES
+    rate_limited = False
     for attempt in range(max_attempts):
-        if not _consume_request_budget():
-            log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
-            return None
+        # Only consume a budget slot on a fresh request, not after a rate-limit wait.
+        if not rate_limited:
+            if not _consume_request_budget():
+                log.warning("Session request limit reached (%d). Skipping %s", SESSION_REQUEST_LIMIT, url)
+                return None
+        rate_limited = False
         try:
             resp = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
         except requests.exceptions.Timeout:
@@ -345,6 +349,7 @@ def _get(url: str, params: dict = None, retries: int = None):
             wait = min(max(reset - int(time.time()), 1), 120)
             log.info("Rate limited (HTTP %d) — waiting %ds...", resp.status_code, wait)
             time.sleep(wait)
+            rate_limited = True
             continue
 
         if resp.status_code == 404:
@@ -404,7 +409,7 @@ def expand_query(intent: str) -> list[str]:
     terms: set[str] = set(re.findall(r'\b\w+\b', intent_lower))
 
     for domain, keywords in DOMAIN_EXPANSIONS.items():
-        if domain in intent_lower or any(kw.split()[0] in intent_lower for kw in keywords[:3]):
+        if _word_match(domain, intent_lower) or any(_word_match(kw, intent_lower) for kw in keywords[:3]):
             terms.update(keywords)
 
     for capability in triggered_capabilities(intent):
@@ -418,7 +423,7 @@ def expand_query(intent: str) -> list[str]:
 
 def _word_match(phrase: str, text: str) -> bool:
     """True if phrase appears as a whole word (or phrase) in text."""
-    return bool(re.search(r'(?<![a-z])' + re.escape(phrase.lower()) + r'(?![a-z])', text.lower()))
+    return bool(re.search(r'(?<!\w)' + re.escape(phrase.lower()) + r'(?!\w)', text.lower()))
 
 
 def triggered_domains(intent: str) -> list[str]:
@@ -761,7 +766,11 @@ def infer_profile_archetype(profile: dict) -> dict:
         # already formatted string — limited info, parse what we can
         repo_text = top_repos.lower()
         repo_names = [r.split("(")[0].strip() for r in top_repos.split(",")]
-        repo_dicts = [{"name": n, "stars": 0, "description": ""} for n in repo_names if n]
+        star_counts = [int(m) for m in re.findall(r'\((\d+)⭐\)', top_repos)]
+        repo_dicts = [
+            {"name": n, "stars": star_counts[i] if i < len(star_counts) else 0, "description": ""}
+            for i, n in enumerate(repo_names) if n
+        ]
     else:
         repo_dicts = [r for r in top_repos if isinstance(r, dict)]
         repo_text = " ".join(
@@ -1022,7 +1031,7 @@ def format_profile(profile: dict, search_terms: list[str] = None,
         "company": company,
         "followers": profile.get("followers", 0),
         "public_repos": profile.get("public_repos", 0),
-        "top_repos": ", ".join(
+        "top_repos": top_repos if isinstance(top_repos, str) else ", ".join(
             f"{r['name']}({r['stars']}⭐)" for r in top_repos if isinstance(r, dict)
         ),
         "contributes_to_ai": contributes_to_ai,
@@ -1230,7 +1239,12 @@ def export_csv(profiles: list, filename: str = "output/results.csv"):
     with open(filename, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=profiles[0].keys())
         writer.writeheader()
-        writer.writerows(profiles)
+        for profile in profiles:
+            row = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else v
+                for k, v in profile.items()
+            }
+            writer.writerow(row)
 
 
 def export_json(profiles: list, filename: str = "output/results.json"):
