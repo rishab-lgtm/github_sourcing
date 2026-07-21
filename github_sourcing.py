@@ -592,12 +592,30 @@ def compute_signal_score(
     # Also accept contributes_to_ai from the profile dict itself (stored profiles)
     contributes_to_ai = contributes_to_ai or bool(profile.get("contributes_to_ai"))
 
+    text = f"{bio} {company}"
+
+    # ── Strongest signal: explicit founder/startup intent ─────────────────────
+    strong_founder = any(kw in text for kw in STRONG_FOUNDER_KEYWORDS)
+    if strong_founder:
+        matched_kw = next((kw for kw in STRONG_FOUNDER_KEYWORDS if kw in text), "")
+        score += 35
+        reasons.append(f"Startup signal: '{matched_kw}'")
+    else:
+        # Left a top lab without starting yet — pre-founder signal
+        left_lab = any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"]) and \
+                   any(lab in text for lab in TOP_LAB_KEYWORDS)
+        if left_lab:
+            score += 20
+            reasons.append("Ex-top lab — potential founder")
+
+    # ── Location (nice to have, not dominant) ─────────────────────────────────
     if is_sf:
-        score += 20
+        score += 5
         reasons.append("Based in SF / Bay Area")
 
+    # ── AI contributions (signal, not the whole story) ────────────────────────
     if contributes_to_ai:
-        score += 25
+        score += 10
         reasons.append("Contributes to major AI repos")
 
     evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
@@ -615,19 +633,29 @@ def compute_signal_score(
             reasons.append(f"Matches: {', '.join(matched[:4])}")
 
     if total_stars > 5000:
-        score += 20
+        score += 15
         reasons.append(f"{total_stars:,} total stars")
     elif total_stars > 1000:
-        score += 12
+        score += 10
         reasons.append(f"{total_stars:,} total stars")
-    elif total_stars > 100:
-        score += 6
+    elif total_stars > 200:
+        score += 5
+        reasons.append(f"{total_stars:,} total stars")
 
-    if followers > 1000:
+    # Hidden gem: quietly shipping without a big following
+    if followers < 500 and total_stars > 500:
+        score += 12
+        reasons.append("Low followers, high stars — quietly shipping")
+    elif followers < 200 and total_stars > 200:
         score += 8
+        reasons.append("Low followers, high stars — hidden gem")
+
+    # Followers are a weak signal — big researchers have them too
+    if followers > 5000:
+        score += 5
         reasons.append(f"{followers:,} followers")
-    elif followers > 200:
-        score += 4
+    elif followers > 1000:
+        score += 2
 
     if followers < 200 and total_stars > 500:
         score += 10
