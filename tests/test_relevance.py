@@ -87,8 +87,9 @@ def test_robotics_deployment_requires_both_dimensions():
 def test_robotics_deployment_builds_combined_search_queries():
     queries = sourcing.build_github_user_queries("robotics deployment engineers")
     assert queries
+    robotics_terms = ["robot", "autonomous", "ros", "manipulat", "lidar", "slam"]
     assert all(
-        any(term in query.lower() for term in ["robot", "autonomous", "ros"])
+        any(term in query.lower() for term in robotics_terms)
         for query in queries
     )
     assert any(

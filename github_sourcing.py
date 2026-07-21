@@ -239,8 +239,9 @@ AI_REPOS = [
 ]
 
 ROLE_TERMS = {
-    "ai", "ml", "researcher", "research", "engineer", "developer", "scientist",
-    "founder", "phd", "professor", "student", "builder", "expert", "specialist",
+    "ai", "ml", "researcher", "researchers", "research", "engineer", "engineers",
+    "developer", "developers", "scientist", "scientists", "founder", "founders",
+    "phd", "professor", "student", "builder", "builders", "expert", "specialist",
 }
 
 FILLER_TERMS = {"and", "for", "the", "with", "who", "from", "into", "working"}
@@ -415,10 +416,39 @@ def expand_query(intent: str) -> list[str]:
     return sorted(terms, key=lambda value: (value.lower(), len(value)))
 
 
+def _word_match(phrase: str, text: str) -> bool:
+    """True if phrase appears as a whole word (or phrase) in text."""
+    return bool(re.search(r'(?<![a-z])' + re.escape(phrase.lower()) + r'(?![a-z])', text.lower()))
+
+
 def triggered_domains(intent: str) -> list[str]:
-    """Return known product domains explicitly requested by the user."""
+    """Return known product domains explicitly requested by the user.
+    Uses whole-word matching to avoid substring false positives (e.g. 'BI'
+    inside 'biotech', 'AV' inside 'available'). Handles space/no-space
+    variants (e.g. 'autonomous vehicles' matches key 'autonomousvehicles').
+    """
     intent_lower = intent.lower()
-    return [domain for domain in DOMAIN_EXPANSIONS if domain in intent_lower]
+    matched = []
+    for domain in DOMAIN_EXPANSIONS:
+        # Direct whole-word match on domain key (e.g. 'robotics', 'biotech', 'ai')
+        if _word_match(domain, intent_lower):
+            matched.append(domain)
+            continue
+        # Normalised match for compound keys (e.g. 'autonomousvehicles' ↔ 'autonomous vehicles')
+        if " " not in domain and len(domain) > 6:
+            spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', domain).lower()
+            if _word_match(spaced, intent_lower):
+                matched.append(domain)
+                continue
+        # Expansion keyword alias — only check the first 4 keywords (most specific).
+        # Scanning all keywords causes false positives from generic terms like
+        # 'deployment' (devtools) or 'streaming' (data) appearing in unrelated intents.
+        for kw in DOMAIN_EXPANSIONS[domain][:4]:
+            kw_lower = kw.lower()
+            if len(kw_lower) >= 4 and _word_match(kw_lower, intent_lower):
+                matched.append(domain)
+                break
+    return list(dict.fromkeys(matched))
 
 
 def triggered_capabilities(intent: str) -> list[str]:
@@ -437,8 +467,11 @@ def intent_evidence_groups(intent: str) -> dict[str, list[str]]:
     domains = triggered_domains(intent)
     non_ai_domains = [domain for domain in domains if domain != "ai"]
     for domain in non_ai_domains or domains:
+        # Use the first expansion term as the canonical form (not the key itself,
+        # which may be a run-together string like 'autonomousvehicles').
+        canonical = DOMAIN_EXPANSIONS[domain][0]
         groups[f"domain:{domain}"] = list(dict.fromkeys(
-            [domain, *DOMAIN_EXPANSIONS[domain]]
+            [canonical, *DOMAIN_EXPANSIONS[domain][1:]]
         ))
     for capability in triggered_capabilities(intent):
         groups[f"capability:{capability}"] = CAPABILITY_EXPANSIONS[capability]["terms"]
@@ -467,19 +500,62 @@ def required_evidence_terms(intent: str) -> list[str]:
 
 
 def discovery_terms(intent: str, limit: int = 6) -> list[str]:
-    """Pick deterministic, domain-first terms for real GitHub API queries."""
+    """Pick deterministic, domain-first terms for real GitHub API queries.
+    Always preserves specific raw intent words (e.g. 'RLHF', 'humanoid', 'CRISPR')
+    so they are never dropped in favour of generic expansion terms.
+    """
+    # Raw words from the intent that are specific and non-generic
+    raw_specific = [
+        w.lower() for w in re.findall(r'\b[\w-]{3,}\b', intent)
+        if w.lower() not in FILLER_TERMS and w.lower() not in ROLE_TERMS
+    ]
+
     required = required_evidence_terms(intent)
-    preferred = [term for term in required if term in triggered_domains(intent)]
+
+    # Preferred = exact domain keys + canonical phrase of each triggered domain.
+    # This ensures multi-word domain phrases like "autonomous vehicles" or
+    # "machine learning" are promoted to the front even when they appear late
+    # in the flattened required list.
+    domain_canonicals = {
+        DOMAIN_EXPANSIONS[d][0].lower()
+        for d in triggered_domains(intent)
+    }
+    preferred = [
+        term for term in required
+        if term in triggered_domains(intent) or term in domain_canonicals
+    ]
     multiword = [term for term in required if " " in term and term not in preferred]
     single = [term for term in required if " " not in term and term not in preferred]
-    ordered = preferred + multiword + single
-    return list(dict.fromkeys(ordered))[:limit]
+
+    # Pin raw specific words first so the actual intent keyword leads the query,
+    # then canonical domain phrases, then expanded synonyms.
+    ordered = list(dict.fromkeys(raw_specific + preferred + multiword + single))
+    return ordered[:limit]
 
 
 def discovery_pairs(intent: str, limit: int = 8) -> list[tuple[str, ...]]:
-    """Create domain/function combinations for targeted GitHub searches."""
+    """Create domain/function combinations for targeted GitHub searches.
+    Raw specific intent keywords (e.g. 'RLHF', 'humanoid') are always
+    injected at the front of domain_terms so they appear in actual queries.
+    """
     groups = intent_evidence_groups(intent)
-    domain_terms: list[str] = []
+
+    # Inject raw specific intent keywords at the front of domain terms.
+    # This ensures that specific terms like 'RLHF', 'humanoid', 'CRISPR'
+    # always appear in at least one generated query, even if they are deep
+    # in a long expansion list.
+    cap_triggers: set[str] = {
+        kw.lower()
+        for cap in triggered_capabilities(intent)
+        for kw in CAPABILITY_EXPANSIONS[cap]["triggers"]
+    }
+    raw_specific = [
+        w.lower() for w in re.findall(r'\b[\w-]{3,}\b', intent)
+        if w.lower() not in FILLER_TERMS and w.lower() not in ROLE_TERMS
+        and w.lower() not in cap_triggers
+    ]
+
+    domain_terms: list[str] = list(raw_specific)
     capability_terms: list[str] = []
     for label, terms in groups.items():
         if label.startswith("domain:"):
@@ -487,7 +563,7 @@ def discovery_pairs(intent: str, limit: int = 8) -> list[tuple[str, ...]]:
         else:
             capability = label.split(":", 1)[1]
             capability_terms.extend(CAPABILITY_DISCOVERY_TERMS.get(capability, terms))
-    domain_terms = list(dict.fromkeys(domain_terms))[:4]
+    domain_terms = list(dict.fromkeys(domain_terms))[:5]
     capability_terms = list(dict.fromkeys(capability_terms))[:5]
     if domain_terms and capability_terms:
         pairs = []
