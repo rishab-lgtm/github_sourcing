@@ -164,8 +164,8 @@ TOP_LAB_KEYWORDS = [
 
 FOUNDER_SIGNAL_KEYWORDS = [
     "founder", "co-founder", "stealth", "yc", "y combinator",
-    "seed", "pre-seed", "raising", "independent", "solo", "side project",
-    "left", "quit", "departed", "just started", "new company",
+    "seed", "pre-seed", "raising", "solo", "side project",
+    "just started", "new company",
 ]
 
 STRONG_FOUNDER_KEYWORDS = [
@@ -173,8 +173,17 @@ STRONG_FOUNDER_KEYWORDS = [
     "seed", "pre-seed", "raising", "just launched", "new startup",
     "left google", "left meta", "left openai", "left deepmind",
     "left anthropic", "ex-openai", "ex-google", "ex-meta", "ex-anthropic",
-    "ex-deepmind", "ex-nvidia", "started a company", "independent researcher",
+    "ex-deepmind", "ex-nvidia", "started a company",
     "building in stealth",
+]
+
+# "building" only signals a startup when accompanied by one of these startup-context words.
+# Without context, "building" just means someone is writing code — useless signal.
+BUILDING_CONTEXT_KEYWORDS = [
+    "startup", "company", "product", "saas", "app", "tool", "platform",
+    "agent", "stealth", "launch", "shipped", "mvp", "side project",
+    "bootstrapped", "venture", "b2b", "b2c", "api", "open source",
+    "raising", "seed", "pre-seed", "yc", "y combinator",
 ]
 
 # Large orgs where "building" does NOT mean startup
@@ -563,10 +572,15 @@ def founder_signal(bio: str, company: str = "") -> dict:
     badges, boost = [], 0
     at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
 
+    building_words = ["building", "working on", "shipping", "launched", "making"]
+    has_building_word = any(kw in text for kw in building_words)
+    has_building_context = any(kw in text for kw in BUILDING_CONTEXT_KEYWORDS)
+    is_startup_builder = has_building_word and has_building_context and not at_big_company
+
     if any(kw in text for kw in STRONG_FOUNDER_KEYWORDS):
         badges.append("🚀 Founder")
         boost += 25
-    elif any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS) and not at_big_company:
+    elif (any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS) or is_startup_builder) and not at_big_company:
         badges.append("🚀 Building")
         boost += 15
 
@@ -632,10 +646,13 @@ def compute_signal_score(
         matched_kw = next((kw for kw in STRONG_FOUNDER_KEYWORDS if kw in text), "")
         score += 35
         reasons.append(f"Startup signal: '{matched_kw}'")
-    elif not at_big_company and any(kw in text for kw in ["building", "working on", "shipping", "launched"]):
-        # "building" only counts as startup signal outside big companies
+    elif not at_big_company and (
+        any(kw in text for kw in ["building", "working on", "shipping", "launched", "making"])
+        and any(kw in text for kw in BUILDING_CONTEXT_KEYWORDS)
+    ):
+        # "building" counts only when paired with startup-context words (product, startup, saas, etc.)
         score += 15
-        reasons.append("Actively building something")
+        reasons.append("Building a startup/product")
     else:
         # Left a top lab — pre-founder signal
         left_lab = any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"]) and \

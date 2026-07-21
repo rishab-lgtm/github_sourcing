@@ -105,6 +105,24 @@ class TestBigCompanyResearcher:
         result = founder_signal(bio="building autonomy systems", company="Toyota")
         assert "🚀 Building" not in result["badges"]
 
+    def test_building_alone_no_context_does_not_badge(self):
+        """'building' without startup context should NOT produce Building badge."""
+        result = founder_signal(bio="building and learning every day")
+        assert "🚀 Building" not in result["badges"]
+
+    def test_building_with_context_badges_correctly(self):
+        """'building' + startup context word = Building badge."""
+        result = founder_signal(bio="building a b2b saas startup for dev tools")
+        assert "🚀 Building" in result["badges"]
+
+    def test_building_product_badges(self):
+        result = founder_signal(bio="building an AI product for healthcare")
+        assert "🚀 Building" in result["badges"]
+
+    def test_shipped_mvp_badges(self):
+        result = founder_signal(bio="shipped an mvp, now raising a seed round")
+        assert "🚀 Building" in result["badges"] or "🚀 Founder" in result["badges"]
+
     def test_strong_founder_overrides_big_company(self):
         """Someone who left Google to found a startup should get Founder, not just Researcher."""
         result = founder_signal(bio="ex-google, founder of stealth startup")
