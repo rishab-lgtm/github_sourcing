@@ -578,7 +578,9 @@ def founder_signal(bio: str, company: str = "") -> dict:
             badges.append("🏛 Ex-Top Lab")
             boost += 20  # left the lab — much more interesting
 
-    if any(kw in text for kw in RESEARCHER_KEYWORDS):
+    if any(kw in text for kw in RESEARCHER_KEYWORDS) or (
+        at_big_company and not any(kw in text for kw in STRONG_FOUNDER_KEYWORDS)
+    ):
         badges.append("🔬 Researcher")
         boost += 8
     return {"boost": boost, "badges": badges}
@@ -690,6 +692,7 @@ def compute_signal_score(
         reasons.append(f"{followers:,} followers")
     elif followers > 1000:
         score += 2
+        reasons.append(f"{followers:,} followers")
 
     if followers < 200 and total_stars > 500:
         score += 10
