@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: github-sourcing-ui
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ALLOWED_EMAIL_DOMAIN
+        value: m13.co
+      - key: AUTH_REDIRECT_URL
+        value: https://github-sourcing.onrender.com
+
+  - type: cron
+    name: github-sourcing-daily
+    runtime: python
+    schedule: "0 16 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 scheduler.py
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ALLOWED_EMAIL_DOMAIN
+        value: m13.co
