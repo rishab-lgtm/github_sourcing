@@ -565,6 +565,133 @@ def _account_age_years(created_at: str):
         return None
 
 
+# ── LinkedIn search URL ──────────────────────────────────────────────────────
+
+def linkedin_search_url(name: str, company: str = "", handle: str = "") -> str:
+    """
+    Return a one-click LinkedIn people-search URL pre-filled with name + company.
+    Falls back to name + handle if no company. Never scrapes — just a search link.
+    """
+    import urllib.parse
+    query_parts = [name.strip()] if name.strip() else [handle.strip()]
+    if company.strip():
+        # Strip @-prefixes and common noise from GitHub company fields
+        clean_co = company.strip().lstrip("@").split(",")[0].strip()
+        query_parts.append(clean_co)
+    query = " ".join(query_parts)
+    return f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(query)}"
+
+
+# ── Logical profile classification ───────────────────────────────────────────
+
+# Repo name/description patterns that read as shipped products vs. research artifacts
+_PRODUCT_REPO_SIGNALS = [
+    "api", "sdk", "cli", "dashboard", "saas", "app", "platform", "tool",
+    "server", "client", "deploy", "infra", "plugin", "extension", "bot",
+    "service", "backend", "frontend", "widget", "integration", "stripe",
+    "auth", "payment", "subscription", "landing", "onboard",
+]
+_RESEARCH_REPO_SIGNALS = [
+    "paper", "arxiv", "experiment", "benchmark", "dataset", "eval",
+    "thesis", "survey", "analysis", "study", "replication", "reproduce",
+    "notebook", "colab", "jupyter", "results", "ablation",
+]
+
+
+def infer_profile_archetype(profile: dict) -> dict:
+    """
+    Classify a profile as founder/builder/researcher/unknown using holistic signals:
+    repos, activity, company, bio — not just keyword spotting.
+    Returns {archetype, confidence, signals} where signals is a list of reasons.
+    """
+    bio = (profile.get("bio") or "").lower()
+    company = (profile.get("company") or "").lower()
+    top_repos = profile.get("top_repos", [])
+    followers = profile.get("followers", 0)
+    public_repos = profile.get("public_repos", 0)
+
+    # Normalise repos to list of dicts
+    if isinstance(top_repos, str):
+        # already formatted string — limited info, parse what we can
+        repo_text = top_repos.lower()
+        repo_names = [r.split("(")[0].strip() for r in top_repos.split(",")]
+        repo_dicts = [{"name": n, "stars": 0, "description": ""} for n in repo_names if n]
+    else:
+        repo_dicts = [r for r in top_repos if isinstance(r, dict)]
+        repo_text = " ".join(
+            f"{r.get('name','')} {r.get('description','')}" for r in repo_dicts
+        ).lower()
+
+    signals = []
+    product_score = 0
+    research_score = 0
+
+    # — Repo name/description patterns
+    product_hits = [kw for kw in _PRODUCT_REPO_SIGNALS if kw in repo_text]
+    research_hits = [kw for kw in _RESEARCH_REPO_SIGNALS if kw in repo_text]
+    if product_hits:
+        product_score += len(product_hits) * 2
+        signals.append(f"Repos suggest product work ({', '.join(product_hits[:3])})")
+    if research_hits:
+        research_score += len(research_hits) * 2
+        signals.append(f"Repos suggest research ({', '.join(research_hits[:3])})")
+
+    # — Number of original repos (many repos = actively building things)
+    if public_repos >= 30:
+        product_score += 3
+        signals.append(f"{public_repos} public repos — prolific builder")
+    elif public_repos >= 10:
+        product_score += 1
+
+    # — Follower/star ratio: researchers accumulate followers; builders accumulate stars
+    total_stars = sum(r.get("stars", 0) for r in repo_dicts)
+    if total_stars > 0 and followers > 0:
+        ratio = total_stars / max(followers, 1)
+        if ratio > 3:
+            product_score += 3
+            signals.append(f"High stars-to-followers ratio ({ratio:.1f}x) — shipping not just talking")
+        elif ratio < 0.5 and followers > 500:
+            research_score += 2
+            signals.append("High followers, modest stars — known in the field")
+
+    # — Bio explicit archetype words (broader than keyword lists)
+    if any(w in bio for w in ["phd", "professor", "prof ", "postdoc", "faculty", "university", "lab director"]):
+        research_score += 5
+        signals.append("Academic title in bio")
+    if any(w in bio for w in ["cto", "ceo", "founder", "co-founder", "cofounder"]):
+        product_score += 6
+        signals.append("C-level/founder title in bio")
+    if any(w in bio for w in ["stealth", "seed", "yc", "raising", "pre-seed"]):
+        product_score += 5
+        signals.append("Startup fundraising signal in bio")
+
+    # — Company field inference
+    at_big_co = any(kw in company for kw in BIG_COMPANY_KEYWORDS)
+    if at_big_co:
+        research_score += 3
+        signals.append(f"At large org ({company.strip()})")
+    elif company and not at_big_co:
+        # Small/unknown company or no company = more likely builder
+        product_score += 2
+
+    # — Determine archetype
+    if product_score == 0 and research_score == 0:
+        return {"archetype": "unknown", "confidence": "low", "signals": signals}
+
+    gap = product_score - research_score
+    if gap >= 4:
+        archetype = "builder"
+        confidence = "high" if gap >= 8 else "medium"
+    elif gap <= -4:
+        archetype = "researcher"
+        confidence = "high" if gap <= -8 else "medium"
+    else:
+        archetype = "builder" if gap > 0 else "researcher"
+        confidence = "low"
+
+    return {"archetype": archetype, "confidence": confidence, "signals": signals}
+
+
 # ── Scoring ──────────────────────────────────────────────────────────────────
 
 def founder_signal(bio: str, company: str = "") -> dict:
@@ -738,9 +865,20 @@ def format_profile(profile: dict, search_terms: list[str] = None,
         contributes_to_ai=contributes_to_ai, is_sf=is_sf,
         source_evidence=source_evidence,
     )
+    name = profile.get("name") or ""
+    handle = (profile.get("login") or "").lower()
+    archetype = infer_profile_archetype(profile)
+
+    # LinkedIn: prefer explicit link in blog/website field, fall back to search
+    blog = profile.get("blog") or ""
+    if "linkedin.com" in blog.lower():
+        li_url = blog if blog.startswith("http") else f"https://{blog}"
+    else:
+        li_url = linkedin_search_url(name, company, handle)
+
     result = {
-        "handle": (profile.get("login") or "").lower(),  # always lowercase for dedup consistency
-        "name": profile.get("name") or "",
+        "handle": handle,
+        "name": name,
         "location": location,
         "bio": bio,
         "company": company,
@@ -755,6 +893,10 @@ def format_profile(profile: dict, search_terms: list[str] = None,
         "founder_badges": " | ".join(fs["badges"]),
         "account_age_years": _account_age_years(profile.get("created_at", "")),
         "github_url": profile.get("html_url", ""),
+        "linkedin_url": li_url,
+        "profile_archetype": archetype["archetype"],
+        "archetype_confidence": archetype["confidence"],
+        "archetype_signals": archetype["signals"],
     }
     if extra:
         result.update(extra)

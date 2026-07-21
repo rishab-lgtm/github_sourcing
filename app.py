@@ -154,10 +154,29 @@ def recap_due(frequency: str, last_recap: dict) -> bool:
     return datetime.now() >= last + timedelta(days=delta)
 
 
+def _archetype_html(archetype: str, confidence: str, signals: list) -> str:
+    if not archetype or archetype == "unknown":
+        return ""
+    icon = {"builder": "🔨", "researcher": "🔬"}.get(archetype, "")
+    label = archetype.capitalize()
+    conf_color = {"high": "#0a6641", "medium": "#7a6000", "low": "#6b7280"}.get(confidence, "#6b7280")
+    conf_bg = {"high": "#d4f7e8", "medium": "#fff8d4", "low": "#f3f4f6"}.get(confidence, "#f3f4f6")
+    tips = " · ".join(signals[:3]) if signals else ""
+    tips_html = f'<div style="font-size:0.68rem;color:#6b7280;margin-top:3px">{tips}</div>' if tips else ""
+    return f"""
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid #f0f0f5">
+        <span style="font-size:0.65rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em">Profile reads as</span>
+        <span style="margin-left:8px;background:{conf_bg};color:{conf_color};font-size:0.72rem;font-weight:700;padding:2px 10px;border-radius:8px">{icon} {label}</span>
+        <span style="margin-left:6px;font-size:0.65rem;color:#9ca3af">({confidence} confidence)</span>
+        {tips_html}
+    </div>"""
+
+
 def render_profile_card(row: dict, is_new: bool = False):
     handle = row.get("handle", "")
     name = row.get("name") or handle
     github_url = row.get("github_url", f"https://github.com/{handle}")
+    linkedin_url = row.get("linkedin_url", "")
     location = row.get("location", "")
     company = row.get("company", "")
     bio = row.get("bio", "")
@@ -168,6 +187,9 @@ def render_profile_card(row: dict, is_new: bool = False):
     followers = row.get("followers", 0) or 0
     public_repos = row.get("public_repos", 0) or 0
     reasons = row.get("match_reasons") or []
+    archetype = row.get("profile_archetype", "")
+    archetype_conf = row.get("archetype_confidence", "")
+    archetype_signals = row.get("archetype_signals") or []
 
     meta_parts = []
     if location: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x1F4CD; {location}</span>')
@@ -212,9 +234,12 @@ def render_profile_card(row: dict, is_new: bool = False):
                     {new_html}
                     {badge_html}
                 </div>
-                <a class="profile-handle" href="{github_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px;margin-top:2px">
-                    @{handle}
-                </a>
+                <div style="display:flex;align-items:center;gap:10px;margin-top:3px;flex-wrap:wrap">
+                    <a class="profile-handle" href="{github_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px">
+                        @{handle}
+                    </a>
+                    {f'<a href="{linkedin_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px;font-size:0.72rem;color:#0a66c2;font-weight:600;text-decoration:none;background:#e8f0fb;padding:2px 8px;border-radius:6px">&#128279; LinkedIn</a>' if linkedin_url else ''}
+                </div>
                 <div class="profile-meta" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:10px">{" ".join(meta_parts)}</div>
             </div>
             <div style="text-align:center;flex-shrink:0">
@@ -227,6 +252,7 @@ def render_profile_card(row: dict, is_new: bool = False):
             <div style="font-size:0.65rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">Why this score</div>
             <div>{reasons_html}</div>
         </div>
+        {_archetype_html(archetype, archetype_conf, archetype_signals)}
         {f'<div style="margin-top:8px">{stats_html}</div>' if stats_html else ''}
         {f'<div style="margin-top:6px">{repos_html}</div>' if repos_html else ''}
     </div>

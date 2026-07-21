@@ -365,3 +365,102 @@ class TestRealisticVCSourcingProfiles:
         result = founder_signal(bio="Robotics engineer at Toyota Research Institute", company="Toyota")
         assert "🔬 Researcher" in result["badges"]
         assert "🚀 Building" not in result["badges"]
+
+
+# ── LinkedIn URL generation ────────────────────────────────────────────────────
+
+class TestLinkedInURL:
+    def test_returns_linkedin_search_url(self):
+        from github_sourcing import linkedin_search_url
+        url = linkedin_search_url("John Smith", "Stripe")
+        assert "linkedin.com/search" in url
+        assert "John" in url or "john" in url.lower()
+
+    def test_company_included_in_query(self):
+        from github_sourcing import linkedin_search_url
+        url = linkedin_search_url("Jane Doe", "OpenAI")
+        assert "OpenAI" in url or "openai" in url.lower()
+
+    def test_strips_at_prefix_from_company(self):
+        from github_sourcing import linkedin_search_url
+        url = linkedin_search_url("Bob", "@Google")
+        assert "@Google" not in url
+        assert "Google" in url
+
+    def test_falls_back_to_handle_when_no_name(self):
+        from github_sourcing import linkedin_search_url
+        url = linkedin_search_url("", "", handle="someuser")
+        assert "someuser" in url
+
+    def test_no_crash_on_empty_inputs(self):
+        from github_sourcing import linkedin_search_url
+        url = linkedin_search_url("", "", "")
+        assert isinstance(url, str)
+
+
+# ── Profile archetype inference ───────────────────────────────────────────────
+
+class TestProfileArchetype:
+    def test_product_repos_classify_as_builder(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "software engineer",
+            "company": "my startup",
+            "followers": 50,
+            "public_repos": 40,
+            "top_repos": [
+                {"name": "saas-dashboard", "stars": 120, "description": "SaaS analytics dashboard"},
+                {"name": "stripe-integration", "stars": 80, "description": "Stripe payment API"},
+            ],
+        })
+        assert result["archetype"] == "builder"
+
+    def test_research_repos_classify_as_researcher(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "PhD candidate",
+            "company": "MIT",
+            "followers": 800,
+            "public_repos": 8,
+            "top_repos": [
+                {"name": "arxiv-paper-replication", "stars": 200, "description": "Replication study for NeurIPS paper"},
+                {"name": "benchmark-dataset", "stars": 150, "description": "Benchmark and eval scripts"},
+            ],
+        })
+        assert result["archetype"] == "researcher"
+
+    def test_cto_title_signals_builder(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "CTO at early-stage startup", "company": "",
+            "followers": 100, "public_repos": 20,
+            "top_repos": [],
+        })
+        assert result["archetype"] == "builder"
+
+    def test_high_stars_to_followers_ratio_signals_builder(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "engineer", "company": "",
+            "followers": 100, "public_repos": 15,
+            "top_repos": [{"name": "cool-tool", "stars": 800, "description": "useful cli tool"}],
+        })
+        assert result["archetype"] == "builder"
+
+    def test_unknown_for_empty_profile(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "", "company": "", "followers": 0,
+            "public_repos": 0, "top_repos": [],
+        })
+        assert result["archetype"] == "unknown"
+
+    def test_returns_signals_list(self):
+        from github_sourcing import infer_profile_archetype
+        result = infer_profile_archetype({
+            "bio": "founder at stealth startup", "company": "",
+            "followers": 50, "public_repos": 25,
+            "top_repos": [{"name": "my-saas", "stars": 500, "description": "SaaS platform"}],
+        })
+        assert isinstance(result["signals"], list)
+        assert len(result["signals"]) > 0
