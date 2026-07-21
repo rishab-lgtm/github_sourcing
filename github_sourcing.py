@@ -687,13 +687,14 @@ def get_user_profile(username: str) -> dict:
 
 
 def get_user_repos(username: str, limit: int = 5) -> list:
+    # GitHub users API does not support sort=stars; fetch a broader set and sort client-side.
     repos = _get(
         f"https://api.github.com/users/{username}/repos",
-        params={"sort": "stars", "per_page": limit},
+        params={"sort": "updated", "per_page": 30},
     )
     if not isinstance(repos, list):
         return []
-    return [
+    parsed = [
         {
             "name": r.get("name", ""),
             "stars": r.get("stargazers_count", 0),
@@ -701,8 +702,10 @@ def get_user_repos(username: str, limit: int = 5) -> list:
             "description": r.get("description") or "",
         }
         for r in repos
-        if isinstance(r, dict)
+        if isinstance(r, dict) and not r.get("fork")
     ]
+    parsed.sort(key=lambda r: r["stars"], reverse=True)
+    return parsed[:limit]
 
 
 def _account_age_years(created_at: str):
@@ -821,7 +824,7 @@ def infer_profile_archetype(profile: dict) -> dict:
         signals.append("Startup fundraising signal in bio")
 
     # — Company field inference
-    at_big_co = any(kw in company for kw in BIG_COMPANY_KEYWORDS)
+    at_big_co = any(_word_match(kw, company) for kw in BIG_COMPANY_KEYWORDS)
     if at_big_co:
         research_score += 3
         signals.append(f"At large org ({company.strip()})")
@@ -852,7 +855,7 @@ def infer_profile_archetype(profile: dict) -> dict:
 def founder_signal(bio: str, company: str = "") -> dict:
     text = f"{bio or ''} {company or ''}".lower()
     badges, boost = [], 0
-    at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
+    at_big_company = any(_word_match(kw, text) for kw in BIG_COMPANY_KEYWORDS)
 
     building_words = ["building", "working on", "shipping", "launched", "making"]
     has_building_word = any(kw in text for kw in building_words)
@@ -920,7 +923,7 @@ def compute_signal_score(
     contributes_to_ai = contributes_to_ai or bool(profile.get("contributes_to_ai"))
 
     text = f"{bio} {company}"
-    at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
+    at_big_company = any(_word_match(kw, text) for kw in BIG_COMPANY_KEYWORDS)
 
     # ── Founder / startup intent (strongest signal) ───────────────────────────
     fs = founder_signal(bio, company)
