@@ -93,51 +93,86 @@ DOMAIN_EXPANSIONS: dict[str, list[str]] = {
         "protein", "drug discovery", "therapeutics", "AlphaFold", "wet lab",
         "ml biology", "bio ml", "single cell", "CRISPR", "sequencing",
         "proteomics", "transcriptomics", "cheminformatics", "molecular",
+        "synthetic biology", "cell biology", "pharma",
     ],
     "climate": [
         "climate", "clean energy", "renewable", "carbon", "sustainability",
         "grid", "battery", "solar", "wind", "emissions", "net zero",
-        "energy storage", "electrification", "climate tech",
+        "energy storage", "electrification", "climate tech", "carbon capture",
+        "fusion", "nuclear", "geothermal", "hydrogen",
     ],
     "fintech": [
         "fintech", "payments", "banking", "lending", "credit", "crypto",
         "defi", "blockchain", "trading", "risk", "compliance", "regtech",
-        "neobank", "wealth management", "insurtech",
+        "neobank", "wealth management", "insurtech", "stablecoin",
+        "clearing", "settlement", "treasury", "FX",
     ],
     "robotics": [
         "robotics", "robot", "autonomous", "ROS", "manipulation", "SLAM",
         "drone", "embodied", "motion planning", "control systems", "actuator",
-        "perception", "sim to real",
+        "perception", "sim to real", "humanoid", "legged", "quadruped",
+        "warehouse robotics", "surgical robot", "dexterous",
     ],
     "security": [
         "security", "cybersecurity", "infosec", "cryptography", "zero trust",
         "vulnerability", "penetration testing", "threat", "SOC", "SIEM",
-        "identity", "IAM", "privacy", "encryption",
+        "identity", "IAM", "privacy", "encryption", "red team", "exploit",
+        "firmware security", "supply chain security",
     ],
     "devtools": [
         "developer tools", "devtools", "SDK", "API", "CLI", "IDE", "compiler",
         "debugger", "observability", "monitoring", "CI/CD", "deployment",
         "infrastructure", "platform engineering", "developer experience",
+        "code generation", "linter", "formatter", "testing framework",
     ],
     "ai": [
         "machine learning", "deep learning", "LLM", "language model", "neural",
         "transformer", "diffusion", "generative", "inference", "training",
-        "RLHF", "fine tuning", "embedding", "RAG", "agent", "multimodal",
+        "RLHF", "fine tuning", "finetuning", "post training", "embedding",
+        "RAG", "agent", "multimodal", "vision language", "reasoning",
+        "alignment", "interpretability", "mechanistic",
     ],
     "healthcare": [
         "healthcare", "health", "medical", "clinical", "EHR", "imaging",
         "radiology", "pathology", "digital health", "telehealth", "pharma",
-        "FDA", "HIPAA", "patient", "diagnosis", "treatment",
+        "FDA", "HIPAA", "patient", "diagnosis", "treatment", "medtech",
+        "surgical", "wearable", "biosensor",
     ],
     "data": [
         "data engineering", "data pipeline", "ETL", "warehouse", "lakehouse",
         "dbt", "Spark", "Flink", "Kafka", "Airflow", "analytics", "BI",
-        "streaming", "real time", "data platform",
+        "streaming", "real time", "data platform", "vector database",
+        "feature store", "data mesh",
     ],
     "hardware": [
         "hardware", "chip", "semiconductor", "FPGA", "ASIC", "PCB",
         "embedded", "firmware", "silicon", "processor", "GPU", "TPU",
-        "edge computing", "IoT",
+        "edge computing", "IoT", "custom silicon", "RISC-V", "neuromorphic",
+    ],
+    "space": [
+        "space", "aerospace", "satellite", "rocket", "propulsion", "orbital",
+        "launch vehicle", "spacecraft", "mission", "GNC", "avionics",
+        "space systems", "NewSpace", "smallsat", "CubeSat",
+    ],
+    "defense": [
+        "defense", "autonomous systems", "perception", "ISR", "autonomy",
+        "surveillance", "radar", "signal processing", "edge AI", "drones",
+        "dual use", "government", "DoD", "national security",
+    ],
+    "quantum": [
+        "quantum", "quantum computing", "qubit", "quantum error correction",
+        "quantum hardware", "quantum algorithms", "quantum networking",
+        "superconducting", "photonics", "quantum simulation",
+    ],
+    "autonomousvehicles": [
+        "autonomous vehicles", "self-driving", "AV", "lidar", "perception",
+        "prediction", "planning", "HD map", "sensor fusion", "ADAS",
+        "autonomy stack", "waymo", "cruise", "fleet",
+    ],
+    "infra": [
+        "infrastructure", "cloud", "distributed systems", "networking",
+        "storage", "compute", "kubernetes", "linux kernel", "systems programming",
+        "C++", "Rust", "latency", "throughput", "reliability",
     ],
 }
 
@@ -235,6 +270,38 @@ CAPABILITY_EXPANSIONS: dict[str, dict[str, list[str]]] = {
             "laboratory", "lab", "university",
         ],
     },
+    "founder": {
+        "triggers": [
+            "founder", "co-founder", "cofounder", "starting a company",
+            "starting company", "pre-founder",
+        ],
+        "terms": [
+            "founder", "co-founder", "stealth", "startup", "seed", "yc",
+            "y combinator", "raising", "pre-seed", "angel", "venture",
+        ],
+    },
+    "infra": {
+        "triggers": [
+            "infrastructure engineer", "systems engineer", "platform engineer",
+            "infra", "distributed systems", "kernel engineer",
+        ],
+        "terms": [
+            "infrastructure", "distributed systems", "networking", "storage",
+            "compute", "kubernetes", "linux", "systems programming",
+            "latency", "throughput", "reliability", "SRE", "platform",
+        ],
+    },
+    "alignment": {
+        "triggers": [
+            "alignment", "safety", "interpretability", "mechanistic interpretability",
+            "AI safety", "RLHF", "value alignment",
+        ],
+        "terms": [
+            "alignment", "safety", "interpretability", "mechanistic",
+            "RLHF", "reward modeling", "constitutional AI", "red teaming",
+            "oversight", "scalable oversight", "AI governance",
+        ],
+    },
 }
 
 CAPABILITY_DISCOVERY_TERMS = {
@@ -243,6 +310,9 @@ CAPABILITY_DISCOVERY_TERMS = {
         "systems integration", "commissioning",
     ],
     "research": ["research", "researcher", "research engineer", "scientist", "phd"],
+    "founder": ["founder", "stealth startup", "yc", "seed", "pre-seed"],
+    "infra": ["distributed systems", "infrastructure", "platform engineering", "systems"],
+    "alignment": ["alignment", "interpretability", "AI safety", "RLHF"],
 }
 
 
@@ -949,18 +1019,24 @@ def search_by_intent(intent: str, location: str = "",
         accepted.add(username)
         return True
 
-    # Strategy 1: targeted user searches. Cross-domain intents use several
-    # domain/function pairs instead of one broad OR query.
+    # Strategy 1a: bio-first search — find people who self-describe as the right thing.
+    # Searching GitHub user bios directly is the highest-precision signal:
+    # "RLHF researcher" in someone's own bio is stronger than inferring it from repos.
     user_pages = min(max(1, (max_results // 60) + 1), 3)
-    inspected_limit = min(max(max_results * 3, 60), 180)
-    for user_q in build_github_user_queries(
-        intent, location=location, min_followers=min_followers
-    ):
-        log.info("User search: %s", user_q)
-        user_items = _paginate("https://api.github.com/search/users", params={
-            "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
+    inspected_limit = min(max(max_results * 5, 150), 400)
+
+    bio_terms = discovery_terms(intent, limit=4)
+    for bio_term in bio_terms[:3]:
+        bio_q = f'"{bio_term}" in:bio type:user'
+        if location:
+            bio_q += f' location:"{location}"'
+        if min_followers:
+            bio_q += f" followers:>={min_followers}"
+        log.info("Bio search: %s", bio_q)
+        bio_items = _paginate("https://api.github.com/search/users", params={
+            "q": bio_q, "sort": "repositories", "order": "desc", "per_page": 30,
         }, max_pages=user_pages)
-        for item in user_items:
+        for item in bio_items:
             username = (item.get("login") or "").lower()
             if username in profile_cache:
                 continue
@@ -969,6 +1045,26 @@ def search_by_intent(intent: str, location: str = "",
                 break
         if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
             break
+
+    # Strategy 1b: broader user searches across domain/function pairs.
+    # Sort by repositories (active builders) not followers (established names).
+    if len(candidates) < max_results:
+        for user_q in build_github_user_queries(
+            intent, location=location, min_followers=min_followers
+        ):
+            log.info("User search: %s", user_q)
+            user_items = _paginate("https://api.github.com/search/users", params={
+                "q": user_q, "sort": "repositories", "order": "desc", "per_page": 30,
+            }, max_pages=user_pages)
+            for item in user_items:
+                username = (item.get("login") or "").lower()
+                if username in profile_cache:
+                    continue
+                add_candidate(username)
+                if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
+                    break
+            if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
+                break
 
     # Strategy 2: domain repo search → owners and contributors. Each domain term
     # drives its own GitHub query so broad intent expansion does not become an
@@ -1011,7 +1107,7 @@ def search_by_intent(intent: str, location: str = "",
         repo_full = repo.get("full_name") or ""
         contributors = _get(
             f"https://api.github.com/repos/{repo_full}/contributors",
-            params={"per_page": 5},
+            params={"per_page": 15},
         )
         for contributor in (contributors if isinstance(contributors, list) else []):
             username = (contributor.get("login") or "").lower()
@@ -1025,6 +1121,33 @@ def search_by_intent(intent: str, location: str = "",
                 break
         if len(candidates) >= max_results:
             break
+
+    # Strategy 3: topic-based repo search — find repos tagged with domain topics,
+    # then pull their owners. GitHub topics are curated by the repo owner, making
+    # them high-precision signals for what someone is actually working on.
+    if len(candidates) < max_results:
+        topic_terms = discovery_terms(intent, limit=3)
+        for topic in topic_terms[:2]:
+            topic_slug = topic.lower().replace(" ", "-")
+            topic_q = f"topic:{topic_slug} stars:>10"
+            log.info("Topic search: %s", topic_q)
+            topic_repos = _paginate("https://api.github.com/search/repositories", params={
+                "q": topic_q, "sort": "stars", "order": "desc", "per_page": 10,
+            }, max_pages=2)
+            for repo in topic_repos:
+                repo_full = repo.get("full_name") or ""
+                source_evidence = _repo_evidence(repo)
+                owner = (repo.get("owner", {}).get("login") or "").lower()
+                source_extra = {
+                    "source_repo": repo_full,
+                    "source_repo_stars": repo.get("stargazers_count", 0),
+                    "match_evidence": source_evidence[:300],
+                }
+                add_candidate(owner, source_evidence=source_evidence, extra=source_extra)
+                if len(candidates) >= max_results:
+                    break
+            if len(candidates) >= max_results:
+                break
 
     candidates.sort(key=lambda x: -x["signal_score"])
     return candidates[:max_results]
