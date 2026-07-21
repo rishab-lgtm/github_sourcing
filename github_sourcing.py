@@ -837,51 +837,41 @@ def compute_signal_score(
     text = f"{bio} {company}"
     at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
 
-    # ── Strongest signal: explicit founder/startup intent ─────────────────────
-    strong_founder = any(kw in text for kw in STRONG_FOUNDER_KEYWORDS)
-    if strong_founder:
-        matched_kw = next((kw for kw in STRONG_FOUNDER_KEYWORDS if kw in text), "")
-        score += 35
-        reasons.append(f"Startup signal: '{matched_kw}'")
-    elif not at_big_company and (
-        any(kw in text for kw in ["building", "working on", "shipping", "launched", "making"])
-        and any(kw in text for kw in BUILDING_CONTEXT_KEYWORDS)
-    ):
-        # "building" counts only when paired with startup-context words (product, startup, saas, etc.)
-        score += 15
-        reasons.append("Building a startup/product")
-    else:
-        # Left a top lab — pre-founder signal
-        left_lab = any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"]) and \
-                   any(lab in text for lab in TOP_LAB_KEYWORDS)
-        if left_lab:
-            score += 20
-            reasons.append("Ex-top lab — potential founder")
+    # ── Founder / startup intent (strongest signal) ───────────────────────────
+    fs = founder_signal(bio, company)
+    score += fs["boost"]
+    for badge in fs["badges"]:
+        reasons.append(f"Signal: {badge.split(' ', 1)[1]}")
 
-    # ── Location (nice to have, not dominant) ─────────────────────────────────
-    if is_sf:
-        score += 5
-        reasons.append("Based in SF / Bay Area")
-
-    # ── AI contributions (signal, not the whole story) ────────────────────────
-    if contributes_to_ai:
+    # Extra boost for people who clearly LEFT a big org to build (pre-founder)
+    left_lab = (
+        any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"])
+        and any(lab in text for lab in TOP_LAB_KEYWORDS)
+        and not at_big_company
+    )
+    if left_lab and "🚀 Founder" not in " ".join(fs["badges"]):
         score += 10
-        reasons.append("Contributes to major AI repos")
+        reasons.append("Left top lab — likely pre-founder")
 
+    # ── Domain / intent match ─────────────────────────────────────────────────
     evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
     if evidence_groups:
+        # Each matched dimension adds points but with diminishing returns —
+        # matching 1 dimension well > weakly matching 3.
         for label, terms in evidence_groups.items():
             matched = [term for term in terms if term.lower() in evidence]
             if matched:
-                score += 15
+                pts = 20 if len(matched) >= 3 else 12
                 readable = label.split(":", 1)[-1].replace("_", " ").title()
+                score += pts
                 reasons.append(f"{readable} evidence: {', '.join(matched[:3])}")
     elif search_terms:
         matched = [t for t in search_terms if t.lower() in evidence]
         if matched:
-            score += min(len(matched) * 5, 25)
+            score += min(len(matched) * 4, 20)
             reasons.append(f"Matches: {', '.join(matched[:4])}")
 
+    # ── Stars (output signal — what they've actually shipped) ─────────────────
     if total_stars > 5000:
         score += 15
         reasons.append(f"{total_stars:,} total stars")
@@ -892,15 +882,16 @@ def compute_signal_score(
         score += 5
         reasons.append(f"{total_stars:,} total stars")
 
-    # Hidden gem: quietly shipping without a big following
-    if followers < 500 and total_stars > 500:
+    # ── Hidden gem: low profile but high output ───────────────────────────────
+    # Only fire once — use the higher threshold if both would apply.
+    if followers < 300 and total_stars > 500:
         score += 12
         reasons.append("Low followers, high stars — quietly shipping")
-    elif followers < 200 and total_stars > 200:
-        score += 8
+    elif followers < 150 and total_stars > 150:
+        score += 6
         reasons.append("Low followers, high stars — hidden gem")
 
-    # Followers are a weak signal — big researchers have them too
+    # ── Followers (weak signal — famous ≠ pre-founder) ───────────────────────
     if followers > 5000:
         score += 5
         reasons.append(f"{followers:,} followers")
@@ -908,14 +899,15 @@ def compute_signal_score(
         score += 2
         reasons.append(f"{followers:,} followers")
 
-    if followers < 200 and total_stars > 500:
-        score += 10
-        reasons.append("Low followers, high stars — hidden gem")
+    # ── Location ─────────────────────────────────────────────────────────────
+    if is_sf:
+        score += 5
+        reasons.append("Based in SF / Bay Area")
 
-    fs = founder_signal(bio, company)
-    score += fs["boost"]
-    for badge in fs["badges"]:
-        reasons.append(f"Signal: {badge.split(' ', 1)[1]}")
+    # ── AI contributions ──────────────────────────────────────────────────────
+    if contributes_to_ai:
+        score += 10
+        reasons.append("Contributes to major AI repos")
 
     return min(score, 100), reasons
 
@@ -1019,24 +1011,17 @@ def search_by_intent(intent: str, location: str = "",
         accepted.add(username)
         return True
 
-    # Strategy 1a: bio-first search — find people who self-describe as the right thing.
-    # Searching GitHub user bios directly is the highest-precision signal:
-    # "RLHF researcher" in someone's own bio is stronger than inferring it from repos.
+    # Strategy 1: targeted user searches across domain/function pairs.
     user_pages = min(max(1, (max_results // 60) + 1), 3)
-    inspected_limit = min(max(max_results * 5, 150), 400)
-
-    bio_terms = discovery_terms(intent, limit=4)
-    for bio_term in bio_terms[:3]:
-        bio_q = f'"{bio_term}" in:bio type:user'
-        if location:
-            bio_q += f' location:"{location}"'
-        if min_followers:
-            bio_q += f" followers:>={min_followers}"
-        log.info("Bio search: %s", bio_q)
-        bio_items = _paginate("https://api.github.com/search/users", params={
-            "q": bio_q, "sort": "repositories", "order": "desc", "per_page": 30,
+    inspected_limit = min(max(max_results * 3, 60), 180)
+    for user_q in build_github_user_queries(
+        intent, location=location, min_followers=min_followers
+    ):
+        log.info("User search: %s", user_q)
+        user_items = _paginate("https://api.github.com/search/users", params={
+            "q": user_q, "sort": "followers", "order": "desc", "per_page": 30,
         }, max_pages=user_pages)
-        for item in bio_items:
+        for item in user_items:
             username = (item.get("login") or "").lower()
             if username in profile_cache:
                 continue
@@ -1045,26 +1030,6 @@ def search_by_intent(intent: str, location: str = "",
                 break
         if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
             break
-
-    # Strategy 1b: broader user searches across domain/function pairs.
-    # Sort by repositories (active builders) not followers (established names).
-    if len(candidates) < max_results:
-        for user_q in build_github_user_queries(
-            intent, location=location, min_followers=min_followers
-        ):
-            log.info("User search: %s", user_q)
-            user_items = _paginate("https://api.github.com/search/users", params={
-                "q": user_q, "sort": "repositories", "order": "desc", "per_page": 30,
-            }, max_pages=user_pages)
-            for item in user_items:
-                username = (item.get("login") or "").lower()
-                if username in profile_cache:
-                    continue
-                add_candidate(username)
-                if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
-                    break
-            if len(candidates) >= max_results or len(profile_cache) >= inspected_limit:
-                break
 
     # Strategy 2: domain repo search → owners and contributors. Each domain term
     # drives its own GitHub query so broad intent expansion does not become an
@@ -1107,7 +1072,7 @@ def search_by_intent(intent: str, location: str = "",
         repo_full = repo.get("full_name") or ""
         contributors = _get(
             f"https://api.github.com/repos/{repo_full}/contributors",
-            params={"per_page": 15},
+            params={"per_page": 5},
         )
         for contributor in (contributors if isinstance(contributors, list) else []):
             username = (contributor.get("login") or "").lower()
@@ -1121,33 +1086,6 @@ def search_by_intent(intent: str, location: str = "",
                 break
         if len(candidates) >= max_results:
             break
-
-    # Strategy 3: topic-based repo search — find repos tagged with domain topics,
-    # then pull their owners. GitHub topics are curated by the repo owner, making
-    # them high-precision signals for what someone is actually working on.
-    if len(candidates) < max_results:
-        topic_terms = discovery_terms(intent, limit=3)
-        for topic in topic_terms[:2]:
-            topic_slug = topic.lower().replace(" ", "-")
-            topic_q = f"topic:{topic_slug} stars:>10"
-            log.info("Topic search: %s", topic_q)
-            topic_repos = _paginate("https://api.github.com/search/repositories", params={
-                "q": topic_q, "sort": "stars", "order": "desc", "per_page": 10,
-            }, max_pages=2)
-            for repo in topic_repos:
-                repo_full = repo.get("full_name") or ""
-                source_evidence = _repo_evidence(repo)
-                owner = (repo.get("owner", {}).get("login") or "").lower()
-                source_extra = {
-                    "source_repo": repo_full,
-                    "source_repo_stars": repo.get("stargazers_count", 0),
-                    "match_evidence": source_evidence[:300],
-                }
-                add_candidate(owner, source_evidence=source_evidence, extra=source_extra)
-                if len(candidates) >= max_results:
-                    break
-            if len(candidates) >= max_results:
-                break
 
     candidates.sort(key=lambda x: -x["signal_score"])
     return candidates[:max_results]
