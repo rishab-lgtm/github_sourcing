@@ -446,6 +446,7 @@ with tab_search:
                     )
                     st.session_state["_show_save_form"] = False
                     st.success(f"Saved '{qs_name}'! Go to Saved Searches to see it.")
+                    st.rerun()
             with col_cx:
                 if st.button("Cancel", key="qs_cancel"):
                     st.session_state["_show_save_form"] = False

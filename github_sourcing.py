@@ -87,7 +87,16 @@ DOMAIN_EXPANSIONS: dict[str, list[str]] = {
     "ai": [
         "machine learning", "deep learning", "LLM", "language model", "neural",
         "transformer", "diffusion", "generative", "inference", "training",
-        "RLHF", "fine tuning", "embedding", "RAG", "agent", "multimodal",
+        "RLHF", "fine tuning", "finetuning", "post training", "alignment",
+        "reward model", "PPO", "DPO", "embedding", "RAG", "agent", "multimodal",
+        "stealth", "founder", "building", "ex-openai", "ex-anthropic",
+    ],
+    "rlhf": [
+        "RLHF", "reinforcement learning human feedback", "post training",
+        "reward model", "PPO", "DPO", "GRPO", "alignment", "fine tuning",
+        "finetuning", "instruction tuning", "preference learning", "constitutional AI",
+        "stealth AI", "ex-openai", "ex-anthropic", "ex-deepmind", "building",
+        "founder", "startup", "inference", "training infra",
     ],
     "healthcare": [
         "healthcare", "health", "medical", "clinical", "EHR", "imaging",
@@ -131,6 +140,17 @@ FOUNDER_SIGNAL_KEYWORDS = [
     "building", "founder", "co-founder", "stealth", "previously", "ex-",
     "formerly", "alumni", "independent", "open to", "looking for", "startup",
     "llm", "agent", "inference", "infra", "platform", "developer tools",
+    "yc", "y combinator", "seed", "raising", "pre-seed", "backed",
+    "left", "quit", "departed", "launched", "shipping", "side project",
+    "open source", "working on", "new company", "just started",
+]
+
+STRONG_FOUNDER_KEYWORDS = [
+    "founder", "co-founder", "stealth", "building in stealth", "yc",
+    "y combinator", "seed", "pre-seed", "raising", "just launched",
+    "left google", "left meta", "left openai", "left deepmind",
+    "left anthropic", "ex-openai", "ex-google", "ex-meta", "ex-anthropic",
+    "ex-deepmind", "started a company", "new startup",
 ]
 
 AI_REPOS = [
@@ -445,39 +465,65 @@ def compute_signal_score(
     # Also accept contributes_to_ai from the profile dict itself (stored profiles)
     contributes_to_ai = contributes_to_ai or bool(profile.get("contributes_to_ai"))
 
-    if is_sf:
+    text = f"{bio} {company}".lower()
+
+    # ── Strongest signal: explicit founder/startup intent ─────────────────────
+    strong_founder = any(kw in text for kw in STRONG_FOUNDER_KEYWORDS)
+    if strong_founder:
+        score += 35
+        matched_kw = next((kw for kw in STRONG_FOUNDER_KEYWORDS if kw in text), "")
+        reasons.append(f"Startup signal: '{matched_kw}'")
+
+    # ── Left a top lab (pre-founder signal) ───────────────────────────────────
+    left_lab = any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"]) and \
+               any(lab in text for lab in TOP_LAB_KEYWORDS)
+    if left_lab and not strong_founder:
         score += 20
-        reasons.append("Based in SF / Bay Area")
+        reasons.append("Ex-top lab — potential founder")
 
-    if contributes_to_ai:
-        score += 25
-        reasons.append("Contributes to major AI repos")
-
+    # ── Domain match ──────────────────────────────────────────────────────────
     if search_terms:
         evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
         matched = [t for t in search_terms if t.lower() in evidence]
         if matched:
-            score += min(len(matched) * 5, 25)
+            score += min(len(matched) * 4, 20)
             reasons.append(f"Matches: {', '.join(matched[:4])}")
 
+    # ── Repo traction (building something real) ───────────────────────────────
     if total_stars > 5000:
-        score += 20
+        score += 18
         reasons.append(f"{total_stars:,} total stars")
     elif total_stars > 1000:
         score += 12
         reasons.append(f"{total_stars:,} total stars")
-    elif total_stars > 100:
+    elif total_stars > 200:
         score += 6
+        reasons.append(f"{total_stars:,} total stars")
 
-    if followers > 1000:
+    # ── Hidden gem: high stars, low followers = quietly shipping ──────────────
+    if followers < 500 and total_stars > 500:
+        score += 12
+        reasons.append("Low followers, high stars — quietly shipping")
+    elif followers < 200 and total_stars > 200:
         score += 8
-        reasons.append(f"{followers:,} followers")
-    elif followers > 200:
-        score += 4
-
-    if followers < 200 and total_stars > 500:
-        score += 10
         reasons.append("Low followers, high stars — hidden gem")
+
+    # ── Community signal (not dominant — researchers get this too) ────────────
+    if followers > 5000:
+        score += 6
+        reasons.append(f"{followers:,} followers")
+    elif followers > 1000:
+        score += 3
+
+    # ── AI contributions ──────────────────────────────────────────────────────
+    if contributes_to_ai:
+        score += 10
+        reasons.append("Contributes to major AI repos")
+
+    # ── Location (nice to have, not dominant) ─────────────────────────────────
+    if is_sf:
+        score += 5
+        reasons.append("Based in SF / Bay Area")
 
     fs = founder_signal(bio, company)
     score += fs["boost"]
