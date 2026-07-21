@@ -163,9 +163,27 @@ TOP_LAB_KEYWORDS = [
 ]
 
 FOUNDER_SIGNAL_KEYWORDS = [
-    "building", "founder", "co-founder", "stealth", "previously", "ex-",
-    "formerly", "alumni", "independent", "open to", "looking for", "startup",
-    "llm", "agent", "inference", "infra", "platform", "developer tools",
+    "founder", "co-founder", "stealth", "yc", "y combinator",
+    "seed", "pre-seed", "raising", "independent", "solo", "side project",
+    "left", "quit", "departed", "just started", "new company",
+]
+
+STRONG_FOUNDER_KEYWORDS = [
+    "founder", "co-founder", "stealth", "yc", "y combinator",
+    "seed", "pre-seed", "raising", "just launched", "new startup",
+    "left google", "left meta", "left openai", "left deepmind",
+    "left anthropic", "ex-openai", "ex-google", "ex-meta", "ex-anthropic",
+    "ex-deepmind", "ex-nvidia", "started a company", "independent researcher",
+    "building in stealth",
+]
+
+# Large orgs where "building" does NOT mean startup
+BIG_COMPANY_KEYWORDS = [
+    "google", "deepmind", "meta", "microsoft", "amazon", "apple", "nvidia",
+    "toyota", "samsung", "ibm", "intel", "salesforce", "oracle", "bytedance",
+    "tencent", "baidu", "alibaba", "openai", "anthropic", "gemini",
+    "waymo", "tesla", "uber", "lyft", "airbnb", "stripe", "palantir",
+    "two sigma", "jane street", "citadel", "d.e. shaw", "renaissance",
 ]
 
 AI_REPOS = [
@@ -543,15 +561,26 @@ def _account_age_years(created_at: str):
 def founder_signal(bio: str, company: str = "") -> dict:
     text = f"{bio or ''} {company or ''}".lower()
     badges, boost = [], 0
-    if any(kw in text for kw in TOP_LAB_KEYWORDS):
-        badges.append("🏛 Top Lab")
-        boost += 20
-    if any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS):
+    at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
+
+    if any(kw in text for kw in STRONG_FOUNDER_KEYWORDS):
+        badges.append("🚀 Founder")
+        boost += 25
+    elif any(kw in text for kw in FOUNDER_SIGNAL_KEYWORDS) and not at_big_company:
         badges.append("🚀 Building")
         boost += 15
+
+    if any(kw in text for kw in TOP_LAB_KEYWORDS):
+        if at_big_company and not any(kw in text for kw in STRONG_FOUNDER_KEYWORDS):
+            badges.append("🏛 Top Lab")
+            boost += 5  # still at big company, not a startup signal
+        else:
+            badges.append("🏛 Ex-Top Lab")
+            boost += 20  # left the lab — much more interesting
+
     if any(kw in text for kw in RESEARCHER_KEYWORDS):
         badges.append("🔬 Researcher")
-        boost += 10
+        boost += 8
     return {"boost": boost, "badges": badges}
 
 
@@ -593,6 +622,7 @@ def compute_signal_score(
     contributes_to_ai = contributes_to_ai or bool(profile.get("contributes_to_ai"))
 
     text = f"{bio} {company}"
+    at_big_company = any(kw in text for kw in BIG_COMPANY_KEYWORDS)
 
     # ── Strongest signal: explicit founder/startup intent ─────────────────────
     strong_founder = any(kw in text for kw in STRONG_FOUNDER_KEYWORDS)
@@ -600,8 +630,12 @@ def compute_signal_score(
         matched_kw = next((kw for kw in STRONG_FOUNDER_KEYWORDS if kw in text), "")
         score += 35
         reasons.append(f"Startup signal: '{matched_kw}'")
+    elif not at_big_company and any(kw in text for kw in ["building", "working on", "shipping", "launched"]):
+        # "building" only counts as startup signal outside big companies
+        score += 15
+        reasons.append("Actively building something")
     else:
-        # Left a top lab without starting yet — pre-founder signal
+        # Left a top lab — pre-founder signal
         left_lab = any(kw in text for kw in ["ex-", "formerly", "previously", "left ", "alumni"]) and \
                    any(lab in text for lab in TOP_LAB_KEYWORDS)
         if left_lab:
