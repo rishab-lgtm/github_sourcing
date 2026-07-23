@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "github-sourcing-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "DEV_BYPASS_AUTH=1 python3 -m streamlit run app.py --server.port 3001"],
+      "port": 3001
+    }
+  ]
+}

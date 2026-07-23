@@ -81,31 +81,43 @@ def _profile_row(p: dict, show_reasons: bool = False) -> str:
     score = p.get("signal_score", 0)
     color = _score_color(score)
     reasons = p.get("match_reasons") or []
+    bio = (p.get("bio") or "").strip()
+    linkedin_url = p.get("linkedin_url") or ""
+    github_url = p.get("github_url") or ""
+
     reasons_html = ""
     if show_reasons and reasons:
         items = "".join(f"<li>{_e(r)}</li>" for r in reasons[:4])
         reasons_html = f'<ul style="margin:4px 0 0;padding-left:16px;font-size:11px;color:#6b7280;">{items}</ul>'
 
+    bio_html = f'<div style="font-size:11px;color:#6b7280;margin-top:3px;font-style:italic;">{_e(bio[:120])}{"…" if len(bio) > 120 else ""}</div>' if bio else ""
+
+    links_html = f'<a href="{_e(github_url)}" style="color:#0083FF;font-size:11px;margin-right:8px;">GitHub</a>' if github_url else ""
+    if linkedin_url:
+        links_html += f'<a href="{_e(linkedin_url)}" style="color:#0a66c2;font-size:11px;">LinkedIn</a>'
+
     return f"""
     <tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;vertical-align:top;">
-            <a href="{_e(p.get('github_url',''))}" style="color:#0083FF;font-weight:600;text-decoration:none;">
+        <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;vertical-align:top;">
+            <a href="{_e(github_url)}" style="color:#0083FF;font-weight:600;text-decoration:none;">
                 @{_e(p.get('handle',''))}
             </a><br>
-            <span style="font-size:12px;color:#6b7280;">{_e(p.get('name',''))}</span>
+            <span style="font-size:12px;color:#374151;font-weight:500;">{_e(p.get('name',''))}</span>
+            {bio_html}
+            <div style="margin-top:4px">{links_html}</div>
+            {reasons_html}
         </td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;">
+        <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;white-space:nowrap;">
             {_e(p.get('location','') or '—')}
         </td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;">
+        <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;">
             {_e(p.get('company','') or '—')}
         </td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;">
+        <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:13px;vertical-align:top;">
             {_e(p.get('founder_badges','') or '—')}
         </td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:{color};font-weight:700;vertical-align:top;">
+        <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:{color};font-weight:700;vertical-align:top;text-align:center;">
             {score}
-            {reasons_html}
         </td>
     </tr>"""
 

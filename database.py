@@ -398,6 +398,72 @@ def json_load(f):
     return json.load(f)
 
 
+# ── Pipeline / profile actions ───────────────────────────────────────────────
+
+def get_candidate_actions(user_email: str) -> dict:
+    """Return {handle: {status, note, updated_at}} for all actions by this user."""
+    user_email = _require_user_email(user_email)
+    client = get_client()
+    try:
+        rows = client.table("candidate_actions").select("*").eq("user_email", user_email).execute().data or []
+        return {r["handle"]: r for r in rows}
+    except Exception as e:
+        log.warning("get_candidate_actions: %s", e)
+        return {}
+
+
+def set_candidate_action(user_email: str, handle: str, status: str, note: str = "") -> bool:
+    """Upsert a status/note for a profile. status: 'none'|'interested'|'contacted'|'passed'."""
+    user_email = _require_user_email(user_email)
+    handle = handle.lower().strip()
+    client = get_client()
+    try:
+        client.table("candidate_actions").upsert({
+            "user_email": user_email,
+            "handle": handle,
+            "status": status,
+            "note": note,
+            "updated_at": datetime.utcnow().isoformat(),
+        }, on_conflict="user_email,handle").execute()
+        audit(user_email, "candidate_action", {"handle": handle, "status": status})
+        return True
+    except Exception as e:
+        log.warning("set_candidate_action: %s", e)
+        return False
+
+
+def get_user_pipeline(user_email: str, statuses: list = None) -> list:
+    """Return candidates with status in `statuses` (default: interested + contacted), enriched."""
+    user_email = _require_user_email(user_email)
+    statuses = statuses or ["interested", "contacted"]
+    client = get_client()
+    try:
+        actions = (
+            client.table("candidate_actions").select("*")
+            .eq("user_email", user_email).in_("status", statuses)
+            .order("updated_at", desc=True).execute().data or []
+        )
+        if not actions:
+            return []
+        handles = [a["handle"] for a in actions]
+        profiles_raw = (
+            client.table("candidates").select("*").in_("handle", handles).execute().data or []
+        )
+        profile_map = {p["handle"]: p for p in profiles_raw}
+        result = []
+        for action in actions:
+            h = action["handle"]
+            profile = profile_map.get(h, {"handle": h})
+            profile["_status"] = action["status"]
+            profile["_note"] = action.get("note", "")
+            profile["_action_updated"] = action.get("updated_at", "")[:10]
+            result.append(profile)
+        return result
+    except Exception as e:
+        log.warning("get_user_pipeline: %s", e)
+        return []
+
+
 # ── Velocity / snapshot tracking ──────────────────────────────────────────────
 
 def _top_repo_stars(top_repos_str: str) -> int:

@@ -45,6 +45,9 @@ from database import (
     load_user_recap,
     save_user_recap,
     audit,
+    get_candidate_actions,
+    set_candidate_action,
+    get_user_pipeline,
 )
 from dotenv import load_dotenv
 
@@ -172,6 +175,14 @@ def _archetype_html(archetype: str, confidence: str, signals: list) -> str:
     </div>"""
 
 
+_STATUS_LABELS = {
+    "none": ("—", "#9ca3af", "#f3f4f6"),
+    "interested": ("⭐ Interested", "#0a6641", "#d4f7e8"),
+    "contacted": ("📨 Contacted", "#1d4ed8", "#dbeafe"),
+    "passed": ("✗ Passed", "#6b7280", "#f3f4f6"),
+}
+
+
 def render_profile_card(row: dict, is_new: bool = False):
     handle = row.get("handle", "")
     name = row.get("name") or handle
@@ -225,6 +236,13 @@ def render_profile_card(row: dict, is_new: bool = False):
     stars = total_stars(top_repos)
     if stars: stats_html += f'<span style="font-size:0.75rem;color:#6b7280"><strong style="color:#150F3A">{stars:,}</strong> total stars</span>'
 
+    actions = st.session_state.get("candidate_actions", {})
+    current_action = actions.get(handle, {})
+    current_status = current_action.get("status", "none")
+    current_note = current_action.get("note", "")
+    status_label, status_fg, status_bg = _STATUS_LABELS.get(current_status, _STATUS_LABELS["none"])
+    status_chip = f'<span style="background:{status_bg};color:{status_fg};font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:6px;margin-left:6px">{status_label}</span>' if current_status != "none" else ""
+
     st.markdown(f"""
     <div class="profile-card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem">
@@ -233,6 +251,7 @@ def render_profile_card(row: dict, is_new: bool = False):
                     <span class="profile-name">{name}</span>
                     {new_html}
                     {badge_html}
+                    {status_chip}
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;margin-top:3px;flex-wrap:wrap">
                     <a class="profile-handle" href="{github_url}" target="_blank" style="display:inline-flex;align-items:center;gap:4px">
@@ -258,13 +277,43 @@ def render_profile_card(row: dict, is_new: bool = False):
     </div>
     """, unsafe_allow_html=True)
 
+    # Status buttons + note — rendered outside the HTML block so Streamlit handles interactivity
+    with st.expander("Track this person", expanded=(current_status != "none")):
+        btn_cols = st.columns(4)
+        for i, (st_key, (st_lbl, _, _)) in enumerate(_STATUS_LABELS.items()):
+            if st_key == "none":
+                continue
+            btn_idx = i - 1
+            if btn_idx < 3:
+                pressed = btn_cols[btn_idx].button(
+                    st_lbl, key=f"status_{handle}_{st_key}",
+                    type="primary" if current_status == st_key else "secondary",
+                    use_container_width=True,
+                )
+                if pressed and current_status != st_key:
+                    set_candidate_action(USER_EMAIL, handle, st_key, current_note)
+                    st.session_state["candidate_actions"][handle] = {"status": st_key, "note": current_note}
+                    st.rerun()
+        if current_status != "none":
+            if btn_cols[3].button("Clear", key=f"status_{handle}_clear", use_container_width=True):
+                set_candidate_action(USER_EMAIL, handle, "none", "")
+                st.session_state["candidate_actions"][handle] = {"status": "none", "note": ""}
+                st.rerun()
+        note_val = st.text_input(
+            "Note", value=current_note, placeholder="Add context, meeting notes…",
+            key=f"note_{handle}", label_visibility="collapsed",
+        )
+        if note_val != current_note:
+            set_candidate_action(USER_EMAIL, handle, current_status, note_val)
+            st.session_state["candidate_actions"][handle] = {"status": current_status, "note": note_val}
+
 
 def apply_filters(df: pd.DataFrame, prev_handles: set = None,
                   min_score: int = 0, filter_badges: list = None,
                   min_stars: int = 0, bio_keyword: str = "",
                   region: str = "", max_account_age: int = 15,
                   stealth_only: bool = False, show_new_only: bool = False,
-                  sort_by: str = "Signal Score") -> pd.DataFrame:
+                  hide_passed: bool = True, sort_by: str = "Signal Score") -> pd.DataFrame:
     for col in ["founder_badges", "company", "bio", "location", "top_repos"]:
         if col not in df.columns:
             df[col] = ""
@@ -284,6 +333,11 @@ def apply_filters(df: pd.DataFrame, prev_handles: set = None,
         df = df[df["account_age_years"] <= max_account_age]
     if stealth_only:
         df = df[df["bio"].str.lower().str.contains("stealth", na=False)]
+    if hide_passed:
+        actions = st.session_state.get("candidate_actions", {})
+        passed_handles = {h for h, a in actions.items() if a.get("status") == "passed"}
+        if passed_handles:
+            df = df[~df["handle"].isin(passed_handles)]
     if show_new_only and prev_handles:
         df = df[~df["handle"].isin(prev_handles)]
 
@@ -312,7 +366,8 @@ def run_search(mode: str, intent: str, region: str, max_results: int = 75,
 def display_results(results: list, prev_handles: set,
                     min_score: int, filter_badges: list, min_stars: int,
                     bio_keyword: str, region: str, max_account_age: int,
-                    stealth_only: bool, show_new_only: bool, sort_by: str):
+                    stealth_only: bool, show_new_only: bool, hide_passed: bool,
+                    sort_by: str):
     new_handle_set = {p["handle"] for p in results if p["handle"] not in prev_handles}
     removed = len(prev_handles - {p["handle"] for p in results})
 
@@ -320,7 +375,8 @@ def display_results(results: list, prev_handles: set,
         pd.DataFrame(results), prev_handles=prev_handles,
         min_score=min_score, filter_badges=filter_badges, min_stars=min_stars,
         bio_keyword=bio_keyword, region=region, max_account_age=max_account_age,
-        stealth_only=stealth_only, show_new_only=show_new_only, sort_by=sort_by,
+        stealth_only=stealth_only, show_new_only=show_new_only, hide_passed=hide_passed,
+        sort_by=sort_by,
     )
 
     m1, m2, m3 = st.columns(3)
@@ -345,8 +401,14 @@ def display_results(results: list, prev_handles: set,
     )
 
 
-# ── Load notification prefs ───────────────────────────────────────────────────
+# ── Load notification prefs & pipeline actions ────────────────────────────────
 prefs = get_notification_prefs(USER_EMAIL)
+
+if "candidate_actions" not in st.session_state:
+    try:
+        st.session_state["candidate_actions"] = get_candidate_actions(USER_EMAIL)
+    except Exception:
+        st.session_state["candidate_actions"] = {}
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -375,6 +437,7 @@ with st.sidebar:
     max_account_age = st.slider("Max account age (yrs)", 1, 15, 15)
     stealth_only    = st.checkbox("Stealth only", value=False)
     show_new_only   = st.checkbox("Only show new profiles", value=False)
+    hide_passed     = st.checkbox("Hide passed profiles", value=True)
     sort_by         = st.selectbox("Sort by", ["Signal Score", "Followers", "Repo Stars"])
 
     # Rate limit indicator
@@ -411,8 +474,8 @@ st.markdown("""
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_search, tab_saved, tab_breakout, tab_history, tab_settings = st.tabs(
-    ["Search", "Saved Searches", "Breakouts", "History", "Settings"]
+tab_search, tab_pipeline, tab_saved, tab_breakout, tab_history, tab_settings = st.tabs(
+    ["Search", "Pipeline", "Saved Searches", "Breakouts", "History", "Settings"]
 )
 
 
@@ -568,7 +631,7 @@ with tab_search:
             display_results(
                 results, prev_handles,
                 min_score, filter_badges, min_stars, bio_keyword, region,
-                max_account_age, stealth_only, show_new_only, sort_by,
+                max_account_age, stealth_only, show_new_only, hide_passed, sort_by,
             )
 
             # Save search — prominent, not hidden
@@ -617,7 +680,7 @@ with tab_search:
             display_results(
                 last_results, set(),
                 min_score, filter_badges, min_stars, bio_keyword, region,
-                max_account_age, stealth_only, show_new_only, sort_by,
+                max_account_age, stealth_only, show_new_only, hide_passed, sort_by,
             )
             if mode == "Intent Search" and intent.strip():
                 scan_label = intent.strip()
@@ -639,6 +702,107 @@ with tab_search:
                                     mode=mode, filters={"region": region, "bio_keyword": bio_keyword},
                                     notify_on_new=notify_toggle2)
                         st.success(f"Saved '{save_name2}' — will auto-run and alert you when new people match.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB: Pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_pipeline:
+    st.markdown('<div class="section-header">Your Pipeline</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <p style="font-size:0.83rem;color:rgba(21,15,58,0.6);margin-top:-0.5rem;margin-bottom:1rem;">
+        Everyone you've marked as Interested or Contacted across all searches.
+    </p>
+    """, unsafe_allow_html=True)
+
+    pipe_col1, pipe_col2 = st.columns([2, 1])
+    with pipe_col1:
+        pipe_status_filter = st.multiselect(
+            "Show statuses", ["interested", "contacted", "passed"],
+            default=["interested", "contacted"], label_visibility="collapsed",
+        )
+    with pipe_col2:
+        pipe_refresh = st.button("🔄 Refresh", key="pipe_refresh")
+
+    if "pipeline_data" not in st.session_state or pipe_refresh:
+        try:
+            st.session_state["pipeline_data"] = get_user_pipeline(
+                USER_EMAIL, statuses=pipe_status_filter or ["interested", "contacted"]
+            )
+        except Exception as e:
+            st.session_state["pipeline_data"] = []
+            st.warning(f"Could not load pipeline — run the schema migration first. ({e})")
+
+    pipeline = st.session_state.get("pipeline_data", [])
+
+    if not pipeline:
+        st.markdown("""
+        <div style="text-align:center;padding:3rem 1rem;color:rgba(21,15,58,0.4);">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem;">📋</div>
+            <p>No one tracked yet.<br>
+            Run a search, then mark people as <strong>Interested</strong> or <strong>Contacted</strong>.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        pm1, pm2, pm3 = st.columns(3)
+        pm1.metric("Tracking", len(pipeline))
+        pm2.metric("Interested", sum(1 for p in pipeline if p.get("_status") == "interested"))
+        pm3.metric("Contacted", sum(1 for p in pipeline if p.get("_status") == "contacted"))
+        st.markdown("")
+
+        for person in pipeline:
+            handle = person.get("handle", "")
+            status = person.get("_status", "")
+            note = person.get("_note", "")
+            updated = person.get("_action_updated", "")
+            github_url = person.get("github_url") or f"https://github.com/{handle}"
+            linkedin_url = person.get("linkedin_url", "")
+            name = person.get("name") or handle
+            bio = person.get("bio") or ""
+            company = person.get("company") or ""
+            score = person.get("signal_score") or 0
+            badges = person.get("founder_badges") or ""
+            _, status_fg, status_bg = _STATUS_LABELS.get(status, _STATUS_LABELS["none"])
+            status_label = _STATUS_LABELS.get(status, _STATUS_LABELS["none"])[0]
+
+            li_html = f'<a href="{linkedin_url}" target="_blank" style="font-size:0.72rem;color:#0a66c2;font-weight:600;text-decoration:none;background:#e8f0fb;padding:2px 8px;border-radius:6px">&#128279; LinkedIn</a>' if linkedin_url else ""
+            badge_html = "".join(f'<span class="badge">{b.strip()}</span>' for b in str(badges).split("|") if b.strip())
+            note_html = f'<div style="font-size:0.78rem;color:#6b7280;margin-top:6px;padding:4px 8px;background:#f9fafb;border-radius:6px;border-left:2px solid #e5e7eb">📝 {note}</div>' if note else ""
+
+            st.markdown(f"""
+            <div class="profile-card">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                    <div style="flex:1">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span class="profile-name">{name}</span>
+                            <span style="background:{status_bg};color:{status_fg};font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:6px">{status_label}</span>
+                            {badge_html}
+                        </div>
+                        <div style="display:flex;align-items:center;gap:10px;margin-top:4px;flex-wrap:wrap">
+                            <a class="profile-handle" href="{github_url}" target="_blank">@{handle}</a>
+                            {li_html}
+                            {f'<span style="font-size:0.75rem;color:#9ca3af">{company}</span>' if company else ''}
+                        </div>
+                        {f'<div class="profile-bio">"{bio}"</div>' if bio else ''}
+                        {note_html}
+                    </div>
+                    <div style="text-align:center;flex-shrink:0">
+                        <div style="background:#f3f4f6;color:#150F3A;border-radius:12px;padding:6px 14px;font-weight:800;font-size:1.4rem">{score}</div>
+                        <div style="font-size:0.6rem;color:#9ca3af;margin-top:2px">Updated {updated}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("")
+        if pipeline:
+            pipe_csv = pd.DataFrame([{
+                "handle": p.get("handle"), "name": p.get("name"), "status": p.get("_status"),
+                "note": p.get("_note"), "company": p.get("company"), "bio": p.get("bio"),
+                "signal_score": p.get("signal_score"), "github_url": p.get("github_url"),
+            } for p in pipeline]).to_csv(index=False)
+            st.download_button("⬇ Export Pipeline CSV", data=pipe_csv,
+                               file_name="m13_pipeline.csv", mime="text/csv")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

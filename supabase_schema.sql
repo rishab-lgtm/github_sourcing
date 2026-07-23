@@ -108,6 +108,19 @@ create table if not exists candidate_snapshots (
 );
 create index if not exists idx_snapshots_handle on candidate_snapshots(handle, recorded_at desc);
 
+-- 9. Per-user profile status and notes (pipeline tracking)
+create table if not exists candidate_actions (
+    id bigint generated always as identity primary key,
+    user_email text not null,
+    handle text not null,
+    status text not null default 'none',  -- 'none' | 'interested' | 'contacted' | 'passed'
+    note text default '',
+    updated_at timestamptz default now(),
+    unique(user_email, handle)
+);
+create index if not exists idx_candidate_actions_user on candidate_actions(user_email, status);
+alter table candidate_actions enable row level security;
+
 -- ── Indexes ──────────────────────────────────────────────────────────────────
 create index if not exists idx_saved_searches_user on saved_searches(user_email);
 create index if not exists idx_search_runs_user on search_runs(user_email, ran_at desc);
