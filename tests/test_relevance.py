@@ -1,5 +1,6 @@
 """Regression tests for intent relevance and evidence gating."""
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import github_sourcing as sourcing
@@ -110,6 +111,70 @@ def test_intent_fit_outranks_popularity_for_deployment_search():
     assert result["signal_score"] >= 30
     assert any("Robotics evidence" in reason for reason in result["match_reasons"])
     assert any("Deployment evidence" in reason for reason in result["match_reasons"])
+
+
+def test_direct_evidence_outranks_source_only_popularity():
+    direct = _profile(
+        login="field-builder",
+        bio="Robotics deployment engineer operating autonomous robot fleets",
+    )
+    popular_generalist = _profile(
+        login="popular-generalist",
+        bio="Open source developer",
+    )
+    popular_generalist["followers"] = 50_000
+    source = "robot-lab/fleet-deploy robotics deployment and field testing"
+
+    direct_result = sourcing.format_profile(
+        direct,
+        intent="robotics deployment engineers",
+        source_evidence=source,
+    )
+    source_result = sourcing.format_profile(
+        popular_generalist,
+        intent="robotics deployment engineers",
+        source_evidence=source,
+    )
+
+    assert direct_result["signal_score"] > source_result["signal_score"]
+    assert direct_result["match_confidence"] == "strong"
+    assert source_result["match_confidence"] == "exploratory"
+    assert any(
+        "Exploratory match" in reason
+        for reason in source_result["match_reasons"]
+    )
+
+
+def test_recent_public_work_gets_a_small_recency_boost():
+    now = datetime.now(timezone.utc)
+    recent = _profile(
+        bio="Robotics deployment engineer",
+        repos=[{
+            "name": "fleet",
+            "stars": 10,
+            "description": "robot fleet deployment",
+            "pushed_at": (now - timedelta(days=20)).isoformat(),
+        }],
+    )
+    stale = _profile(
+        bio="Robotics deployment engineer",
+        repos=[{
+            "name": "fleet",
+            "stars": 10,
+            "description": "robot fleet deployment",
+            "pushed_at": (now - timedelta(days=900)).isoformat(),
+        }],
+    )
+
+    recent_result = sourcing.format_profile(
+        recent, intent="robotics deployment engineers"
+    )
+    stale_result = sourcing.format_profile(
+        stale, intent="robotics deployment engineers"
+    )
+
+    assert recent_result["signal_score"] > stale_result["signal_score"]
+    assert recent_result["activity_recency_days"] <= 30
 
 
 def test_relevant_org_repo_contributors_are_not_skipped():

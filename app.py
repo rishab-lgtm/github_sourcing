@@ -31,6 +31,8 @@ from github_sourcing import (
     SESSION_REQUEST_LIMIT,
 )
 from search_service import SearchConfig, execute_search
+from explanations import explain_candidate
+from personalization import personalize_for_user
 from database import (
     upsert_user,
     upsert_profiles,
@@ -222,15 +224,14 @@ def render_profile_card(row: dict, is_new: bool = False):
     company = safe_text(row.get("company", ""))
     bio = safe_text(row.get("bio", ""))
     badges = row.get("founder_badges", "")
-    score = row.get("signal_score", 0)
+    score = int(row.get("signal_score") or 0)
+    personalized_score = int(row.get("personalized_score") or score)
+    preference_adjustment = int(row.get("preference_adjustment") or 0)
+    personalization_active = bool(row.get("personalization_active"))
     top_repos = row.get("top_repos", "")
     acct_age = row.get("account_age_years")
     followers = row.get("followers", 0) or 0
     public_repos = row.get("public_repos", 0) or 0
-    reasons = row.get("match_reasons") or []
-    archetype = row.get("profile_archetype", "")
-    archetype_conf = row.get("archetype_confidence", "")
-    archetype_signals = row.get("archetype_signals") or []
 
     meta_parts = []
     if location: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x1F4CD; {location}</span>')
@@ -241,24 +242,23 @@ def render_profile_card(row: dict, is_new: bool = False):
         f'<span class="badge">{safe_text(b.strip())}</span>'
         for b in str(badges).split("|") if b.strip()
     )
-    repo_items = [r.strip() for r in str(top_repos).split(",") if r.strip()][:4]
-    repos_html = "".join(f'<span class="repo-tag">{safe_text(r)}</span>' for r in repo_items)
-
-    # Score breakdown — show what drove the score
-    reasons_html = "".join(
-        f'<span class="reason-tag">&#10003; {safe_text(r)}</span>' for r in reasons[:6]
-    )
-
     new_html = '<span class="new-badge">NEW</span>' if is_new else ""
-    bio_html = f'<div class="profile-bio">"{bio}"</div>' if bio and bio not in ("nan", "") else ""
 
     # Score color and label
-    if score >= 70:
+    display_score = personalized_score if personalization_active else score
+    if display_score >= 70:
         score_bg, score_fg, score_label = "#d4f7e8", "#0a6641", "High"
-    elif score >= 50:
+    elif display_score >= 50:
         score_bg, score_fg, score_label = "#fff8d4", "#7a6000", "Mid"
     else:
         score_bg, score_fg, score_label = "#f3f4f6", "#4b5563", "Low"
+    score_kind = "your fit" if personalization_active else "signal"
+    base_score_html = (
+        f'<div style="font-size:0.58rem;color:#9ca3af;margin-top:2px">'
+        f'Base signal {score}'
+        f' · {preference_adjustment:+d} preference</div>'
+        if personalization_active and preference_adjustment else ""
+    )
 
     stats_html = ""
     if followers: stats_html += f'<span style="font-size:0.75rem;color:#6b7280;margin-right:12px"><strong style="color:#150F3A">{followers:,}</strong> followers</span>'
@@ -273,7 +273,7 @@ def render_profile_card(row: dict, is_new: bool = False):
     status_label, status_fg, status_bg = _STATUS_LABELS.get(current_status, _STATUS_LABELS["none"])
     status_chip = f'<span style="background:{status_bg};color:{status_fg};font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:6px;margin-left:6px">{status_label}</span>' if current_status != "none" else ""
 
-    st.markdown(f"""
+    card_html = f"""
     <div class="profile-card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem">
             <div style="flex:1;min-width:0">
@@ -292,20 +292,45 @@ def render_profile_card(row: dict, is_new: bool = False):
                 <div class="profile-meta" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:10px">{" ".join(meta_parts)}</div>
             </div>
             <div style="text-align:center;flex-shrink:0">
-                <div style="background:{score_bg};color:{score_fg};border-radius:12px;padding:6px 14px;font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;line-height:1">{score}</div>
-                <div style="font-size:0.6rem;font-weight:600;color:{score_fg};text-transform:uppercase;letter-spacing:0.06em;margin-top:3px">{score_label} signal</div>
+                <div style="background:{score_bg};color:{score_fg};border-radius:12px;padding:6px 14px;font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;line-height:1">{display_score}</div>
+                <div style="font-size:0.6rem;font-weight:600;color:{score_fg};text-transform:uppercase;letter-spacing:0.06em;margin-top:3px">{score_label} {score_kind}</div>
+                {base_score_html}
             </div>
         </div>
-        {bio_html}
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f5">
-            <div style="font-size:0.65rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">Why this score</div>
-            <div>{reasons_html}</div>
-        </div>
-        {_archetype_html(archetype, archetype_conf, archetype_signals)}
         {f'<div style="margin-top:8px">{stats_html}</div>' if stats_html else ''}
-        {f'<div style="margin-top:6px">{repos_html}</div>' if repos_html else ''}
     </div>
-    """, unsafe_allow_html=True)
+    """
+    # Streamlit's Markdown parser can terminate a raw HTML block when an
+    # optional interpolation produces a blank line. Compacting the card avoids
+    # leaking closing tags as visible code when status/badge/link fields are empty.
+    st.markdown(" ".join(card_html.splitlines()), unsafe_allow_html=True)
+
+    explanation = explain_candidate(row)
+    with st.expander(f"Why this person · @{handle_raw}", expanded=False):
+        why_col, now_col, watch_col = st.columns(3)
+        with why_col:
+            st.markdown("**Why they match**")
+            for item in explanation["why_match"]:
+                st.write(f"• {item}")
+        with now_col:
+            st.markdown("**Why now**")
+            for item in explanation["why_now"]:
+                st.write(f"• {item}")
+        with watch_col:
+            st.markdown("**What to verify**")
+            for item in explanation["watchouts"]:
+                st.write(f"• {item}")
+        evidence_bits = []
+        if bio and bio not in ("nan", ""):
+            evidence_bits.append(f'Bio: "{row.get("bio")}"')
+        if row.get("languages"):
+            evidence_bits.append(
+                f"Languages: {', '.join(str(value) for value in row['languages'][:5])}"
+            )
+        if top_repos:
+            evidence_bits.append(f"Top repositories: {top_repos}")
+        if evidence_bits:
+            st.caption(" · ".join(evidence_bits))
 
     # Status buttons + note — rendered outside the HTML block so Streamlit handles interactivity
     with st.expander("Track this person", expanded=(current_status != "none")):
@@ -395,20 +420,33 @@ def apply_filters(df: pd.DataFrame, prev_handles: set = None,
         df = df.copy()
         df["_stars"] = df["top_repos"].apply(total_stars)
         df = df.sort_values("_stars", ascending=False)
-    else:
+    elif sort_by == "Signal Score":
         df = df.sort_values("signal_score", ascending=False)
+    else:
+        ranking_column = (
+            "personalized_score"
+            if "personalized_score" in df.columns
+            else "signal_score"
+        )
+        df = df.sort_values(
+            [ranking_column, "signal_score"],
+            ascending=[False, False],
+        )
 
     return df
 
 
 def run_search(mode: str, intent: str, region: str, max_results: int = 75,
                saved_search_id: str = None, triggered_by: str = "manual") -> list:
-    return execute_search(SearchConfig(
-        mode=mode,
-        intent=intent.strip(),
-        region=region.strip(),
-        max_results=max_results,
-    ))
+    return personalize_for_user(
+        USER_EMAIL,
+        execute_search(SearchConfig(
+            mode=mode,
+            intent=intent.strip(),
+            region=region.strip(),
+            max_results=max_results,
+        )),
+    )
 
 
 def display_results(results: list, prev_handles: set,
@@ -416,6 +454,7 @@ def display_results(results: list, prev_handles: set,
                     bio_keyword: str, region: str, max_account_age: int,
                     stealth_only: bool, show_new_only: bool, hide_passed: bool,
                     sort_by: str):
+    results = personalize_for_user(USER_EMAIL, results)
     new_handle_set = {p["handle"] for p in results if p["handle"] not in prev_handles}
     removed = len(prev_handles - {p["handle"] for p in results})
 
@@ -431,6 +470,16 @@ def display_results(results: list, prev_handles: set,
     m1.metric("Found", len(results))
     m2.metric("After Filters", len(df))
     m3.metric("New This Run", len(new_handle_set))
+    if results and results[0].get("personalization_active"):
+        st.caption(
+            "Recommended order is personalized from "
+            f"{results[0].get('preference_feedback_count', 0)} of your Pipeline decisions. "
+            "The original signal score is preserved."
+        )
+    else:
+        st.caption(
+            "Recommended order starts learning after 3 Interested, Contacted, or Passed decisions."
+        )
 
     if df.empty:
         st.info("No profiles match your filters. Try lowering the score threshold.")
@@ -486,7 +535,9 @@ with st.sidebar:
     stealth_only    = st.checkbox("Stealth only", value=False)
     show_new_only   = st.checkbox("Only show new profiles", value=False)
     hide_passed     = st.checkbox("Hide passed profiles", value=True)
-    sort_by         = st.selectbox("Sort by", ["Signal Score", "Followers", "Repo Stars"])
+    sort_by         = st.selectbox(
+        "Sort by", ["Recommended", "Signal Score", "Followers", "Repo Stars"]
+    )
 
     # Rate limit indicator
     used = get_session_request_count()

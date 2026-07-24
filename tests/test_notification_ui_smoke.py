@@ -18,6 +18,54 @@ SAVED_SEARCH = {
     "last_result_count": 0,
 }
 
+CACHED_CANDIDATE = {
+    "handle": "robot-builder",
+    "name": "Robot Builder",
+    "bio": "Deploying autonomous robot fleets",
+    "company": "Robotics Lab",
+    "location": "San Francisco",
+    "followers": 120,
+    "public_repos": 12,
+    "top_repos": "fleet-tools(500⭐)",
+    "founder_badges": "🚀 Building",
+    "signal_score": 55,
+    "match_reasons": ["Direct Robotics evidence: robotics"],
+    "github_url": "https://github.com/robot-builder",
+}
+
+FEEDBACK_PROFILES = [
+    {
+        **CACHED_CANDIDATE,
+        "handle": "robot-one",
+        "_status": "contacted",
+        "profile_archetype": "builder",
+    },
+    {
+        **CACHED_CANDIDATE,
+        "handle": "robot-two",
+        "_status": "interested",
+        "profile_archetype": "builder",
+    },
+    {
+        "handle": "bio-one",
+        "_status": "passed",
+        "bio": "Biotech genomics researcher",
+        "top_repos": "protein-lab(100⭐)",
+        "founder_badges": "🔬 Researcher",
+        "profile_archetype": "researcher",
+        "followers": 100,
+    },
+    {
+        "handle": "bio-two",
+        "_status": "passed",
+        "bio": "Protein biology researcher",
+        "top_repos": "biology-tools(100⭐)",
+        "founder_badges": "🔬 Researcher",
+        "profile_archetype": "researcher",
+        "followers": 100,
+    },
+]
+
 
 def test_notification_test_button_and_scheduler_warning():
     stack = ExitStack()
@@ -37,10 +85,17 @@ def test_notification_test_button_and_scheduler_warning():
     mocked("database.get_saved_searches", return_value=[SAVED_SEARCH])
     mocked("database.get_breakout_candidates", return_value=[])
     mocked("database.get_run_history", return_value=[])
-    mocked("database.load_user_results", return_value=[])
+    mocked("database.load_user_results", return_value=[CACHED_CANDIDATE])
     mocked("database.load_user_recap", return_value={})
     mocked("database.get_candidate_actions", return_value={})
-    mocked("database.get_user_pipeline", return_value=[])
+    mocked(
+        "database.get_user_pipeline",
+        side_effect=lambda user_email, statuses=None: (
+            FEEDBACK_PROFILES
+            if statuses == ["interested", "contacted", "passed"]
+            else []
+        ),
+    )
     mocked("database.get_watch_activity", return_value=[])
     mocked("database.get_radar_events", return_value=[])
     mocked("database.upsert_profiles")
@@ -75,6 +130,18 @@ def test_notification_test_button_and_scheduler_warning():
             "Search", "Pipeline", "Saved Searches", "Radar", "History", "Settings"
         ]
         assert any("have not run yet" in error.value for error in app.error)
+        assert any(
+            expander.label == "Why this person · @robot-builder"
+            for expander in app.expander
+        )
+        assert any(
+            "personalized from 4" in caption.value
+            for caption in app.caption
+        )
+        assert not any(
+            "profile-handle" in (code.value or "")
+            for code in app.code
+        )
 
         app.button(key="send_test_notification").click().run()
         send_test.assert_called_with("owner@m13.co")

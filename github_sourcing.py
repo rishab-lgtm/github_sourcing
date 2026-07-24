@@ -700,6 +700,7 @@ def get_user_repos(username: str, limit: int = 5) -> list:
             "stars": r.get("stargazers_count", 0),
             "language": r.get("language", ""),
             "description": r.get("description") or "",
+            "pushed_at": r.get("pushed_at") or r.get("updated_at") or "",
         }
         for r in repos
         if isinstance(r, dict) and not r.get("fork")
@@ -964,18 +965,39 @@ def compute_signal_score(
         reasons.append("Left top lab — likely pre-founder")
 
     # ── Domain / intent match ─────────────────────────────────────────────────
-    evidence = f"{bio} {repo_text} {company} {source_evidence.lower()}"
+    direct_evidence = f"{bio} {repo_text} {company}"
+    source_evidence_lower = source_evidence.lower()
     if evidence_groups:
-        # Each matched dimension adds points but with diminishing returns —
-        # matching 1 dimension well > weakly matching 3.
+        direct_dimension_count = 0
         for label, terms in evidence_groups.items():
-            matched = [term for term in terms if term.lower() in evidence]
-            if matched:
-                pts = 20 if len(matched) >= 3 else 12
+            direct_matches = [
+                term for term in terms if term.lower() in direct_evidence
+            ]
+            source_matches = [
+                term for term in terms if term.lower() in source_evidence_lower
+            ]
+            if direct_matches:
+                direct_dimension_count += 1
+                pts = 20 if len(direct_matches) >= 3 else 12
                 readable = label.split(":", 1)[-1].replace("_", " ").title()
                 score += pts
-                reasons.append(f"{readable} evidence: {', '.join(matched[:3])}")
+                reasons.append(
+                    f"Direct {readable} evidence: {', '.join(direct_matches[:3])}"
+                )
+            elif source_matches:
+                # A targeted repository is useful discovery context, but it is
+                # weaker than evidence in the person's own profile and repos.
+                pts = 8 if len(source_matches) >= 3 else 5
+                readable = label.split(":", 1)[-1].replace("_", " ").title()
+                score += pts
+                reasons.append(
+                    f"Source {readable} evidence: {', '.join(source_matches[:3])}"
+                )
+        if followers >= 5000 and direct_dimension_count == 0:
+            score -= 8
+            reasons.append("Exploratory match — evidence comes from a source repository")
     elif search_terms:
+        evidence = f"{direct_evidence} {source_evidence_lower}"
         matched = [t for t in search_terms if t.lower() in evidence]
         if matched:
             score += min(len(matched) * 4, 20)
@@ -1019,7 +1041,31 @@ def compute_signal_score(
         score += 10
         reasons.append("Contributes to major AI repos")
 
-    return min(score, 100), reasons
+    # ── Recency ──────────────────────────────────────────────────────────────
+    pushed_dates = [
+        repo.get("pushed_at") for repo in top_repos
+        if isinstance(repo, dict) and repo.get("pushed_at")
+    ] if isinstance(top_repos, list) else []
+    if pushed_dates:
+        try:
+            latest = max(
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+                for value in pushed_dates
+            )
+            days_since_push = (datetime.now(timezone.utc) - latest).days
+            if days_since_push <= 90:
+                score += 5
+                reasons.append("Active public repo in the last 90 days")
+            elif days_since_push <= 365:
+                score += 2
+                reasons.append("Public repo activity in the last year")
+            elif days_since_push > 730:
+                score -= 3
+                reasons.append("Top public repos have limited recent activity")
+        except (TypeError, ValueError):
+            pass
+
+    return max(0, min(score, 100)), reasons
 
 
 def format_profile(profile: dict, search_terms: list[str] = None,
@@ -1040,6 +1086,45 @@ def format_profile(profile: dict, search_terms: list[str] = None,
     name = profile.get("name") or ""
     handle = (profile.get("login") or "").lower()
     archetype = infer_profile_archetype(profile)
+    evidence_groups = intent_evidence_groups(intent) if intent else {}
+    direct_dimensions = (
+        matched_intent_dimensions(intent, profile) if intent else {}
+    )
+    all_dimensions = (
+        matched_intent_dimensions(intent, profile, source_evidence) if intent else {}
+    )
+    if evidence_groups and all(direct_dimensions.get(label) for label in evidence_groups):
+        match_confidence = "strong"
+    elif evidence_groups and all(all_dimensions.get(label) for label in evidence_groups):
+        direct_count = sum(
+            bool(direct_dimensions.get(label)) for label in evidence_groups
+        )
+        match_confidence = "medium" if direct_count else "exploratory"
+    else:
+        match_confidence = "medium"
+
+    pushed_dates = [
+        repo.get("pushed_at") for repo in top_repos
+        if isinstance(repo, dict) and repo.get("pushed_at")
+    ] if isinstance(top_repos, list) else []
+    recent_activity_at = ""
+    activity_recency_days = None
+    if pushed_dates:
+        try:
+            latest_activity = max(
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+                for value in pushed_dates
+            )
+            recent_activity_at = latest_activity.isoformat()
+            activity_recency_days = (
+                datetime.now(timezone.utc) - latest_activity
+            ).days
+        except (TypeError, ValueError):
+            pass
+    languages = sorted({
+        repo.get("language") for repo in top_repos
+        if isinstance(repo, dict) and repo.get("language")
+    }) if isinstance(top_repos, list) else []
 
     # LinkedIn: prefer explicit link in blog/website field, fall back to search
     blog = profile.get("blog") or ""
@@ -1069,6 +1154,10 @@ def format_profile(profile: dict, search_terms: list[str] = None,
         "profile_archetype": archetype["archetype"],
         "archetype_confidence": archetype["confidence"],
         "archetype_signals": archetype["signals"],
+        "match_confidence": match_confidence,
+        "recent_activity_at": recent_activity_at,
+        "activity_recency_days": activity_recency_days,
+        "languages": languages,
     }
     if extra:
         result.update(extra)

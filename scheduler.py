@@ -287,6 +287,7 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
         audit,
     )
     from search_service import SearchConfig, execute_search
+    from personalization import personalize_for_user
     from github_sourcing import set_current_user
     from notifications import send_new_profiles_email
 
@@ -309,7 +310,10 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
     )
     if not run_id:
         raise RuntimeError("Could not create a durable record for this search run")
-    results = execute_search(SearchConfig.from_saved_search(search))
+    results = personalize_for_user(
+        user_email,
+        execute_search(SearchConfig.from_saved_search(search)),
+    )
     if not results:
         if not _write_confirmed(update_search_run_count(run_id, 0)):
             raise RuntimeError("Could not finalize the empty search run")
