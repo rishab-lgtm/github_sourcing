@@ -27,6 +27,7 @@ def _make_supabase_mock(return_data=None):
     chain.in_.return_value = chain
     chain.gte.return_value = chain
     chain.lt.return_value = chain
+    chain.contains.return_value = chain
     client = MagicMock()
     client.table.return_value = chain
     client.rpc.return_value = chain
@@ -123,6 +124,32 @@ class TestNotificationPrefsIsolation:
         assert len(upsert_calls) > 0
         payload = upsert_calls[0].args[0]
         assert payload.get("user_email") == "alice@m13.co"
+
+
+class TestPeopleMonitoringIsolation:
+    def test_activity_feed_is_filtered_to_current_user(self):
+        import database
+        client, chain = _make_supabase_mock(return_data=[])
+        with patch("database.get_client", return_value=client):
+            database.get_watch_activity("alice@m13.co")
+
+        assert any(
+            call.args == ("user_email", "alice@m13.co")
+            for call in chain.eq.call_args_list
+        )
+        assert any(
+            call.args == ("action", "person_watch_activity")
+            for call in chain.eq.call_args_list
+        )
+
+    def test_scheduler_reads_watched_people_with_service_client(self):
+        import database
+        client, chain = _make_supabase_mock(return_data=[])
+        with patch("database.get_service_client", return_value=client) as service:
+            database.get_all_watched_actions()
+
+        service.assert_called_once()
+        chain.in_.assert_called_with("status", ["interested", "contacted"])
 
 
 class TestServerDatabaseBoundary:

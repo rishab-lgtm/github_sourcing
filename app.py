@@ -22,8 +22,11 @@ from github_sourcing import (
     find_trending_repo_authors,
     search_by_intent,
     expand_query,
+    format_profile,
     get_session_request_count,
     set_current_user,
+    get_user_profile,
+    get_user_repos,
     SESSION_REQUEST_LIMIT,
 )
 from search_service import SearchConfig, execute_search
@@ -52,6 +55,7 @@ from database import (
     get_candidate_actions,
     set_candidate_action,
     get_user_pipeline,
+    get_watch_activity,
 )
 from dotenv import load_dotenv
 
@@ -786,8 +790,62 @@ with tab_pipeline:
     st.markdown("""
     <p style="font-size:0.83rem;color:rgba(21,15,58,0.6);margin-top:-0.5rem;margin-bottom:1rem;">
         Everyone you've marked as Interested or Contacted across all searches.
+        These people are monitored daily for meaningful new GitHub activity.
     </p>
     """, unsafe_allow_html=True)
+
+    with st.expander("Track someone by GitHub handle"):
+        with st.form("track_handle_form"):
+            tracked_handle_input = st.text_input(
+                "GitHub handle or profile URL",
+                placeholder="octocat or https://github.com/octocat",
+            )
+            add_tracked_person = st.form_submit_button(
+                "Add to Pipeline",
+                type="primary",
+            )
+        if add_tracked_person:
+            normalized_handle = (
+                tracked_handle_input.strip().rstrip("/").split("/")[-1].lstrip("@").lower()
+            )
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?", normalized_handle):
+                st.error("Enter a valid GitHub handle or profile URL.")
+            else:
+                with st.spinner(f"Loading @{normalized_handle} from GitHub…"):
+                    raw_profile = get_user_profile(normalized_handle)
+                    if raw_profile:
+                        raw_profile["top_repos"] = get_user_repos(normalized_handle)
+                        tracked_profile = format_profile(raw_profile)
+                        upsert_profiles([tracked_profile])
+                        record_snapshots([tracked_profile])
+                        tracked_ok = set_candidate_action(
+                            USER_EMAIL,
+                            normalized_handle,
+                            "interested",
+                            "",
+                        )
+                    else:
+                        tracked_ok = False
+                if tracked_ok:
+                    st.session_state["candidate_actions"][normalized_handle] = {
+                        "status": "interested",
+                        "note": "",
+                    }
+                    st.session_state.pop("pipeline_data", None)
+                    audit(
+                        USER_EMAIL,
+                        "person_added_to_pipeline",
+                        {"handle": normalized_handle},
+                    )
+                    st.success(
+                        f"@{normalized_handle} is now in your Pipeline and "
+                        "will be monitored daily."
+                    )
+                    st.rerun()
+                elif raw_profile:
+                    st.error("The profile loaded, but it could not be saved.")
+                else:
+                    st.error("That GitHub profile could not be found.")
 
     pipe_col1, pipe_col2 = st.columns([2, 1])
     with pipe_col1:
@@ -816,6 +874,10 @@ with tab_pipeline:
             st.warning(f"Could not load pipeline — run the schema migration first. ({e})")
 
     pipeline = st.session_state.get("pipeline_data", [])
+    watch_activity = get_watch_activity(USER_EMAIL, limit=100)
+    activity_by_handle: dict[str, list] = {}
+    for event in watch_activity:
+        activity_by_handle.setdefault(event.get("handle", ""), []).append(event)
 
     if not pipeline:
         st.markdown("""
@@ -826,10 +888,11 @@ with tab_pipeline:
         </div>
         """, unsafe_allow_html=True)
     else:
-        pm1, pm2, pm3 = st.columns(3)
+        pm1, pm2, pm3, pm4 = st.columns(4)
         pm1.metric("Tracking", len(pipeline))
         pm2.metric("Interested", sum(1 for p in pipeline if p.get("_status") == "interested"))
         pm3.metric("Contacted", sum(1 for p in pipeline if p.get("_status") == "contacted"))
+        pm4.metric("Recent Updates", len(watch_activity))
         st.markdown("")
 
         for person in pipeline:
@@ -875,6 +938,25 @@ with tab_pipeline:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            person_activity = activity_by_handle.get(handle, [])
+            if person_activity:
+                with st.expander(
+                    f"Recent GitHub activity — @{handle}",
+                    expanded=False,
+                ):
+                    for event in person_activity[:5]:
+                        detected = (
+                            event.get("detected_at", "")[:16].replace("T", " ")
+                        )
+                        st.caption(detected or "Recently detected")
+                        for change in event.get("changes") or []:
+                            st.write(f"• {change}")
+            elif status in ("interested", "contacted"):
+                st.caption(
+                    f"Monitoring @{handle}. A baseline is created on the next "
+                    "daily scheduler run."
+                )
 
         st.markdown("")
         if pipeline:
@@ -1209,13 +1291,17 @@ with tab_settings:
     <div style="background:white;border-radius:12px;padding:1.25rem 1.5rem;border:1px solid #E8E8EC;font-size:0.85rem;color:#150F3A;">
         <p style="margin:0 0 0.75rem;font-weight:600;">Daily automated sourcing</p>
         <p style="margin:0 0 0.5rem;color:#737368;">
-            The Render cron service runs saved searches daily and notifies each owner only about newly matched candidates.
+            The Render cron service runs saved searches daily and notifies each
+            owner only about newly matched candidates. It also checks everyone
+            marked Interested or Contacted for new GitHub activity.
         </p>
         <code style="background:#F7F7F8;padding:0.4rem 0.75rem;border-radius:6px;display:block;margin-top:0.5rem;font-size:0.78rem;color:#0083FF;">
             github-sourcing-daily · 16:00 UTC
         </code>
         <p style="margin:0.75rem 0 0;color:#737368;font-size:0.78rem;">
-            The scheduler runs each saved search, finds new candidates vs prior runs, and sends email notifications — fully automated, no manual clicks needed.
+            Spaces: new candidates are compared against prior alerts. People:
+            new repositories, code pushes, meaningful star/follower growth, and
+            bio or company changes are tracked without repeat alerts.
         </p>
     </div>
     """, unsafe_allow_html=True)

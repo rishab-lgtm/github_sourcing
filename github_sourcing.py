@@ -708,6 +708,28 @@ def get_user_repos(username: str, limit: int = 5) -> list:
     return parsed[:limit]
 
 
+def get_recent_user_repos(username: str, limit: int = 5) -> list:
+    """Return the user's most recently updated original repositories."""
+    repos = _get(
+        f"https://api.github.com/users/{username}/repos",
+        params={"sort": "updated", "direction": "desc", "per_page": 30},
+    )
+    if not isinstance(repos, list):
+        return []
+    return [
+        {
+            "name": repo.get("name", ""),
+            "stars": repo.get("stargazers_count", 0) or 0,
+            "language": repo.get("language", "") or "",
+            "description": repo.get("description") or "",
+            "pushed_at": repo.get("pushed_at") or repo.get("updated_at") or "",
+            "url": repo.get("html_url") or "",
+        }
+        for repo in repos
+        if isinstance(repo, dict) and not repo.get("fork") and repo.get("name")
+    ][:limit]
+
+
 def _account_age_years(created_at: str):
     if not created_at:
         return None
