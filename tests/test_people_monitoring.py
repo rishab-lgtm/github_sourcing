@@ -3,7 +3,14 @@
 from unittest.mock import MagicMock, patch
 
 import notifications
-from scheduler import _watch_snapshot, detect_watched_changes, run_watched_people
+from datetime import datetime, timedelta, timezone
+
+from scheduler import (
+    _watch_snapshot,
+    _weekly_watch_due,
+    detect_watched_changes,
+    run_watched_people,
+)
 
 
 def _profile(**overrides):
@@ -112,6 +119,47 @@ def test_failed_activity_email_is_left_for_retry():
     assert summary == {"watched": 1, "changed": 1, "notified": 0}
     record_activity.assert_called_once()
     record_snapshot.assert_not_called()
+
+
+def test_weekly_monitor_waits_seven_days():
+    now = datetime(2026, 7, 24, tzinfo=timezone.utc)
+    assert not _weekly_watch_due({
+        "_recorded_at": (now - timedelta(days=6)).isoformat(),
+    }, now=now)
+    assert _weekly_watch_due({
+        "_recorded_at": (now - timedelta(days=7)).isoformat(),
+    }, now=now)
+
+
+def test_monitoring_off_records_change_without_email():
+    action = {
+        "user_email": "owner@m13.co",
+        "handle": "robot-builder",
+        "status": "interested",
+        "notify_frequency": "off",
+    }
+    previous = _watch_snapshot(_profile(), _repos())
+    formatted = _profile(followers=125)
+    send = MagicMock(return_value=True)
+
+    with patch("database.get_all_watched_actions", return_value=[action]), \
+         patch("database.get_latest_watch_snapshot", return_value=previous), \
+         patch("database.record_watch_snapshot", return_value=True) as snapshot, \
+         patch("database.record_watch_activity", return_value=True) as activity, \
+         patch("database.upsert_profiles"), \
+         patch("database.record_snapshots"), \
+         patch("database.audit"), \
+         patch("github_sourcing.get_user_profile", return_value={"login": "robot-builder"}), \
+         patch("github_sourcing.get_user_repos", return_value=[]), \
+         patch("github_sourcing.get_recent_user_repos", return_value=_repos()), \
+         patch("github_sourcing.format_profile", return_value=formatted), \
+         patch("github_sourcing.set_current_user"):
+        summary = run_watched_people(send_fn=send)
+
+    assert summary == {"watched": 1, "changed": 1, "notified": 0}
+    activity.assert_called_once()
+    snapshot.assert_called_once()
+    send.assert_not_called()
 
 
 def test_activity_email_escapes_profile_and_change_text():

@@ -42,9 +42,11 @@ def test_notification_test_button_and_scheduler_warning():
     mocked("database.get_candidate_actions", return_value={})
     mocked("database.get_user_pipeline", return_value=[])
     mocked("database.get_watch_activity", return_value=[])
+    mocked("database.get_radar_events", return_value=[])
     mocked("database.upsert_profiles")
     mocked("database.record_snapshots")
     mocked("database.set_candidate_action", return_value=True)
+    mocked("database.set_candidate_monitoring", return_value=True)
     mocked("database.audit")
     mocked("github_sourcing.get_session_request_count", return_value=0)
     mocked("github_sourcing.set_current_user")
@@ -70,7 +72,7 @@ def test_notification_test_button_and_scheduler_warning():
         app.run()
         assert not app.exception
         assert [tab.label for tab in app.tabs] == [
-            "Search", "Pipeline", "Saved Searches", "Breakouts", "History", "Settings"
+            "Search", "Pipeline", "Saved Searches", "Radar", "History", "Settings"
         ]
         assert any("have not run yet" in error.value for error in app.error)
 
