@@ -17,7 +17,10 @@ log = logging.getLogger(__name__)
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_URL = "https://api.resend.com/emails"
-FROM_EMAIL = "onboarding@resend.dev"
+RESEND_FROM_EMAIL = os.environ.get(
+    "RESEND_FROM_EMAIL",
+    "M13 GitHub Sourcing <onboarding@resend.dev>",
+)
 ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "m13.co")
 MAX_SEND_ATTEMPTS = 3
 
@@ -47,7 +50,12 @@ def send_email(to: str, subject: str, body_html: str) -> bool:
                     "Authorization": f"Bearer {RESEND_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={"from": FROM_EMAIL, "to": recipient, "subject": subject, "html": body_html},
+                json={
+                    "from": RESEND_FROM_EMAIL,
+                    "to": recipient,
+                    "subject": subject,
+                    "html": body_html,
+                },
                 timeout=10,
             )
             if resp.ok:
@@ -158,6 +166,23 @@ def _table_html(rows_html: str) -> str:
         </thead>
         <tbody>{rows_html}</tbody>
     </table>"""
+
+
+def send_test_email(to_email: str) -> bool:
+    """Send a small end-to-end delivery check from the Settings screen."""
+    content = """
+    <h2 style="margin:0 0 8px;font-size:20px;font-weight:700;color:#150F3A;">
+        Notifications are connected
+    </h2>
+    <p style="color:#6b7280;margin:0;font-size:14px;line-height:1.6;">
+        This test confirms that the GitHub Sourcing app can deliver email through
+        its production notification provider.
+    </p>"""
+    return send_email(
+        to_email,
+        "M13 GitHub Sourcing — notification test",
+        _email_wrapper(content),
+    )
 
 
 def send_new_profiles_email(profiles: list, to_email: str) -> bool:

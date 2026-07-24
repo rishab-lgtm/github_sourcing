@@ -147,8 +147,8 @@ def get_new_since(days: int = 7) -> list:
 # ── Saved searches ────────────────────────────────────────────────────────────
 
 def save_search(user_email: str, name: str, intent: str, mode: str,
-                filters: dict = None, notify_on_new: bool = True) -> str:
-    """Persist a new saved search. Returns search_id."""
+                filters: dict = None, notify_on_new: bool = True) -> str | None:
+    """Persist a new saved search. Return its ID only after a confirmed write."""
     user_email = _require_user_email(user_email)
     search_id = str(uuid.uuid4())
     client = get_client()
@@ -166,6 +166,7 @@ def save_search(user_email: str, name: str, intent: str, mode: str,
         audit(user_email, "saved_search_created", {"search_id": search_id, "name": name, "intent": intent})
     except Exception as e:
         log.warning("save_search failed: %s", e)
+        return None
     return search_id
 
 
@@ -291,6 +292,27 @@ def get_prior_handles_for_search(saved_search_id: str) -> set:
         return {m["handle"] for m in matches}
     except Exception as e:
         log.warning("get_prior_handles_for_search: %s", e)
+        return set()
+
+
+def get_notified_handles_for_search(saved_search_id: str) -> set:
+    """Return handles already included in a successful alert for this search."""
+    client = get_client()
+    try:
+        runs = (
+            client.table("search_runs").select("run_id")
+            .eq("saved_search_id", saved_search_id).execute().data or []
+        )
+        if not runs:
+            return set()
+        run_ids = [r["run_id"] for r in runs]
+        matches = (
+            client.table("candidate_matches").select("handle,notified_at")
+            .in_("run_id", run_ids).execute().data or []
+        )
+        return {m["handle"] for m in matches if m.get("notified_at")}
+    except Exception as e:
+        log.warning("get_notified_handles_for_search: %s", e)
         return set()
 
 
