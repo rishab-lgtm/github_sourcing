@@ -185,6 +185,34 @@ def send_test_email(to_email: str) -> bool:
     )
 
 
+def send_watched_person_alert(profile: dict, changes: list[str], to_email: str) -> bool:
+    """Notify a user about meaningful new activity from a monitored person."""
+    if not changes:
+        return False
+    handle = _e(profile.get("handle", ""))
+    name = _e(profile.get("name") or profile.get("handle", ""))
+    github_url = _e(
+        profile.get("github_url") or f"https://github.com/{profile.get('handle', '')}"
+    )
+    items = "".join(f"<li style='margin-bottom:6px'>{_e(change)}</li>" for change in changes)
+    content = f"""
+    <h2 style="margin:0 0 4px;font-size:20px;font-weight:700;color:#150F3A;">
+        New activity from {name}
+    </h2>
+    <p style="color:#6b7280;margin:0 0 18px;font-size:14px;">
+        You are monitoring <a href="{github_url}" style="color:#0083FF;">@{handle}</a>
+        in your sourcing pipeline.
+    </p>
+    <ul style="padding-left:20px;color:#374151;font-size:14px;line-height:1.5;">
+        {items}
+    </ul>"""
+    return send_email(
+        to_email,
+        f"M13 Sourcing — new activity from @{profile.get('handle', '')}",
+        _email_wrapper(content),
+    )
+
+
 def send_new_profiles_email(profiles: list, to_email: str) -> bool:
     if not profiles:
         return False

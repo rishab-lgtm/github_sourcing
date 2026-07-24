@@ -486,6 +486,72 @@ def get_user_pipeline(user_email: str, statuses: list = None) -> list:
         return []
 
 
+# ── Watched-person activity ───────────────────────────────────────────────────
+
+def get_all_watched_actions() -> list:
+    """Return all Interested/Contacted people for the trusted daily scheduler."""
+    client = get_service_client()
+    try:
+        return (
+            client.table("candidate_actions").select("*")
+            .in_("status", ["interested", "contacted"]).execute().data or []
+        )
+    except Exception as e:
+        log.warning("get_all_watched_actions: %s", e)
+        return []
+
+
+def get_latest_watch_snapshot(user_email: str, handle: str) -> dict:
+    """Return the latest monitoring baseline for one user/person pair."""
+    user_email = _require_user_email(user_email)
+    handle = (handle or "").strip().lower()
+    if not handle:
+        return {}
+    client = get_client()
+    try:
+        rows = (
+            client.table("audit_log").select("detail,created_at")
+            .eq("user_email", user_email)
+            .eq("action", "person_watch_snapshot")
+            .contains("detail", {"handle": handle})
+            .order("created_at", desc=True).limit(1).execute().data or []
+        )
+        return rows[0].get("detail", {}) if rows else {}
+    except Exception as e:
+        log.warning("get_latest_watch_snapshot: %s", e)
+        return {}
+
+
+def record_watch_snapshot(user_email: str, snapshot: dict):
+    user_email = _require_user_email(user_email)
+    audit(user_email, "person_watch_snapshot", snapshot)
+
+
+def record_watch_activity(user_email: str, detail: dict):
+    user_email = _require_user_email(user_email)
+    audit(user_email, "person_watch_activity", detail)
+
+
+def get_watch_activity(user_email: str, limit: int = 100) -> list:
+    """Return recent detected changes for people this user is monitoring."""
+    user_email = _require_user_email(user_email)
+    client = get_client()
+    try:
+        rows = (
+            client.table("audit_log").select("detail,created_at")
+            .eq("user_email", user_email)
+            .eq("action", "person_watch_activity")
+            .order("created_at", desc=True).limit(limit).execute().data or []
+        )
+        return [
+            {**(row.get("detail") or {}), "detected_at": row.get("created_at", "")}
+            for row in rows
+        ]
+    except Exception as e:
+        log.warning("get_watch_activity: %s", e)
+        return []
+
+
 # ── Velocity / snapshot tracking ──────────────────────────────────────────────
 
 def _top_repo_stars(top_repos_str: str) -> int:
