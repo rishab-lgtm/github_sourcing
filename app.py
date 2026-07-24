@@ -4,6 +4,7 @@ M13 GitHub Sourcing — Streamlit UI
 
 from __future__ import annotations
 
+import html
 import re
 import logging
 import pandas as pd
@@ -54,8 +55,10 @@ from database import (
     audit,
     get_candidate_actions,
     set_candidate_action,
+    set_candidate_monitoring,
     get_user_pipeline,
     get_watch_activity,
+    get_radar_events,
 )
 from dotenv import load_dotenv
 
@@ -87,6 +90,9 @@ if not st.session_state.get("_user_registered"):
 
 set_current_user(USER_EMAIL)
 
+SAFE_USER_EMAIL = html.escape(str(USER_EMAIL or ""), quote=True)
+SAFE_USER_NAME = html.escape(str(USER_NAME or ""), quote=True)
+
 # ── Styles ────────────────────────────────────────────────────────────────────
 st.markdown(
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
@@ -98,6 +104,7 @@ st.markdown("""
 <style>
     :root { --space-blue:#150F3A; --wave-blue:#0083FF; --gray:#737368; --white:#FFFFFF; --off-white:#F7F7F8; --border:#E8E8EC; }
     html, body, [class*="css"], .stApp, .stApp * { font-family:'Poppins',-apple-system,BlinkMacSystemFont,sans-serif !important; -webkit-font-smoothing:antialiased; }
+    [data-testid="stIconMaterial"] { font-family:'Material Symbols Rounded' !important; }
     body, .stApp { background:var(--off-white) !important; }
     #MainMenu, footer, header { visibility:hidden; }
     .block-container { padding-top:1.5rem; padding-bottom:2rem; }
@@ -151,6 +158,19 @@ def total_stars(repos_str: str) -> int:
     return sum(int(s) for s in re.findall(r'\((\d+)⭐\)', repos_str or ""))
 
 
+def safe_text(value) -> str:
+    """Escape external/user-provided values before rendering HTML cards."""
+    return html.escape(str(value or ""), quote=True)
+
+
+def safe_url(value: str, fallback: str = "") -> str:
+    """Allow only normal web links in rendered cards."""
+    value = (value or "").strip()
+    if re.match(r"^https?://", value, flags=re.IGNORECASE):
+        return safe_text(value)
+    return safe_text(fallback)
+
+
 def score_class(score: int) -> str:
     if score >= 60: return "score-high"
     if score >= 50: return "score-mid"
@@ -169,10 +189,11 @@ def _archetype_html(archetype: str, confidence: str, signals: list) -> str:
     if not archetype or archetype == "unknown":
         return ""
     icon = {"builder": "🔨", "researcher": "🔬"}.get(archetype, "")
-    label = archetype.capitalize()
+    label = safe_text(archetype.capitalize())
+    confidence = safe_text(confidence)
     conf_color = {"high": "#0a6641", "medium": "#7a6000", "low": "#6b7280"}.get(confidence, "#6b7280")
     conf_bg = {"high": "#d4f7e8", "medium": "#fff8d4", "low": "#f3f4f6"}.get(confidence, "#f3f4f6")
-    tips = " · ".join(signals[:3]) if signals else ""
+    tips = safe_text(" · ".join(str(signal) for signal in signals[:3])) if signals else ""
     tips_html = f'<div style="font-size:0.68rem;color:#6b7280;margin-top:3px">{tips}</div>' if tips else ""
     return f"""
     <div style="margin-top:8px;padding-top:8px;border-top:1px solid #f0f0f5">
@@ -192,13 +213,14 @@ _STATUS_LABELS = {
 
 
 def render_profile_card(row: dict, is_new: bool = False):
-    handle = row.get("handle", "")
-    name = row.get("name") or handle
-    github_url = row.get("github_url", f"https://github.com/{handle}")
-    linkedin_url = row.get("linkedin_url", "")
-    location = row.get("location", "")
-    company = row.get("company", "")
-    bio = row.get("bio", "")
+    handle_raw = row.get("handle", "")
+    handle = safe_text(handle_raw)
+    name = safe_text(row.get("name") or handle_raw)
+    github_url = safe_url(row.get("github_url"), f"https://github.com/{handle_raw}")
+    linkedin_url = safe_url(row.get("linkedin_url"))
+    location = safe_text(row.get("location", ""))
+    company = safe_text(row.get("company", ""))
+    bio = safe_text(row.get("bio", ""))
     badges = row.get("founder_badges", "")
     score = row.get("signal_score", 0)
     top_repos = row.get("top_repos", "")
@@ -216,15 +238,15 @@ def render_profile_card(row: dict, is_new: bool = False):
     if acct_age is not None: meta_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;color:rgba(21,15,58,0.5);font-size:0.75rem">&#x23F1; {acct_age}yr account</span>')
 
     badge_html = "".join(
-        f'<span class="badge">{b.strip()}</span>'
+        f'<span class="badge">{safe_text(b.strip())}</span>'
         for b in str(badges).split("|") if b.strip()
     )
     repo_items = [r.strip() for r in str(top_repos).split(",") if r.strip()][:4]
-    repos_html = "".join(f'<span class="repo-tag">{r}</span>' for r in repo_items)
+    repos_html = "".join(f'<span class="repo-tag">{safe_text(r)}</span>' for r in repo_items)
 
     # Score breakdown — show what drove the score
     reasons_html = "".join(
-        f'<span class="reason-tag">&#10003; {r}</span>' for r in reasons[:6]
+        f'<span class="reason-tag">&#10003; {safe_text(r)}</span>' for r in reasons[:6]
     )
 
     new_html = '<span class="new-badge">NEW</span>' if is_new else ""
@@ -245,7 +267,7 @@ def render_profile_card(row: dict, is_new: bool = False):
     if stars: stats_html += f'<span style="font-size:0.75rem;color:#6b7280"><strong style="color:#150F3A">{stars:,}</strong> total stars</span>'
 
     actions = st.session_state.get("candidate_actions", {})
-    current_action = actions.get(handle, {})
+    current_action = actions.get(handle_raw, {})
     current_status = current_action.get("status", "none")
     current_note = current_action.get("note", "")
     status_label, status_fg, status_bg = _STATUS_LABELS.get(current_status, _STATUS_LABELS["none"])
@@ -294,13 +316,13 @@ def render_profile_card(row: dict, is_new: bool = False):
             btn_idx = i - 1
             if btn_idx < 3:
                 pressed = btn_cols[btn_idx].button(
-                    st_lbl, key=f"status_{handle}_{st_key}",
+                    st_lbl, key=f"status_{handle_raw}_{st_key}",
                     type="primary" if current_status == st_key else "secondary",
                     use_container_width=True,
                 )
                 if pressed and current_status != st_key:
-                    if set_candidate_action(USER_EMAIL, handle, st_key, current_note):
-                        st.session_state["candidate_actions"][handle] = {
+                    if set_candidate_action(USER_EMAIL, handle_raw, st_key, current_note):
+                        st.session_state["candidate_actions"][handle_raw] = {
                             "status": st_key,
                             "note": current_note,
                         }
@@ -309,9 +331,9 @@ def render_profile_card(row: dict, is_new: bool = False):
                     else:
                         st.error("Could not save this status. Please try again.")
         if current_status != "none":
-            if btn_cols[3].button("Clear", key=f"status_{handle}_clear", use_container_width=True):
-                if set_candidate_action(USER_EMAIL, handle, "none", ""):
-                    st.session_state["candidate_actions"][handle] = {
+            if btn_cols[3].button("Clear", key=f"status_{handle_raw}_clear", use_container_width=True):
+                if set_candidate_action(USER_EMAIL, handle_raw, "none", ""):
+                    st.session_state["candidate_actions"][handle_raw] = {
                         "status": "none",
                         "note": "",
                     }
@@ -321,11 +343,11 @@ def render_profile_card(row: dict, is_new: bool = False):
                     st.error("Could not clear this status. Please try again.")
         note_val = st.text_input(
             "Note", value=current_note, placeholder="Add context, meeting notes…",
-            key=f"note_{handle}", label_visibility="collapsed",
+            key=f"note_{handle_raw}", label_visibility="collapsed",
         )
         if note_val != current_note:
-            if set_candidate_action(USER_EMAIL, handle, current_status, note_val):
-                st.session_state["candidate_actions"][handle] = {
+            if set_candidate_action(USER_EMAIL, handle_raw, current_status, note_val):
+                st.session_state["candidate_actions"][handle_raw] = {
                     "status": current_status,
                     "note": note_val,
                 }
@@ -448,7 +470,7 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("#### Scan Mode")
-    mode = st.radio("", ["Intent Search", "SF-Based AI Contributors", "Trending Repo Authors"],
+    mode = st.radio("Scan mode", ["Intent Search", "SF-Based AI Contributors", "Trending Repo Authors"],
                     label_visibility="collapsed")
 
     st.markdown("---")
@@ -475,7 +497,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(f"""
     <div style="font-size:0.72rem;opacity:0.6;margin-bottom:0.5rem;">
-        Signed in as<br><strong style="opacity:1">{USER_NAME}</strong>
+        Signed in as<br><strong style="opacity:1">{SAFE_USER_NAME}</strong>
     </div>
     """, unsafe_allow_html=True)
     if st.button("Sign out"):
@@ -501,7 +523,7 @@ st.markdown("""
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_search, tab_pipeline, tab_saved, tab_breakout, tab_history, tab_settings = st.tabs(
-    ["Search", "Pipeline", "Saved Searches", "Breakouts", "History", "Settings"]
+    ["Search", "Pipeline", "Saved Searches", "Radar", "History", "Settings"]
 )
 
 
@@ -513,7 +535,7 @@ with tab_search:
     if mode == "Intent Search":
         st.markdown("#### What are you looking for?")
         intent = st.text_input(
-            "", placeholder='"biotech AI researcher", "climate infra engineer", "stealth AI founder"',
+            "Search intent", placeholder='"biotech AI researcher", "climate infra engineer", "stealth AI founder"',
             label_visibility="collapsed",
         )
         if intent:
@@ -643,20 +665,27 @@ with tab_search:
             prev_handles = {p["handle"] for p in prev_results}
             new_profiles = [p for p in results if p["handle"] not in prev_handles]
 
-            save_user_results(USER_EMAIL, results)
-
+            persistence_ok = False
             with st.spinner("Saving to database..."):
                 try:
+                    if not run_id:
+                        raise RuntimeError("The search run could not be recorded")
                     db_result = upsert_profiles(results)
-                    record_matches(run_id, results, source_query=scan_label)
+                    if db_result.get("persisted") is False:
+                        raise RuntimeError("Candidate profiles could not be saved")
+                    if record_matches(run_id, results, source_query=scan_label) is False:
+                        raise RuntimeError("Candidate matches could not be saved")
                     record_snapshots(results)
-                    update_search_run_count(run_id, len(results))
+                    if update_search_run_count(run_id, len(results)) is False:
+                        raise RuntimeError("The search run could not be finalized")
                     audit(USER_EMAIL, "search_run", {"intent": scan_label, "mode": mode, "count": len(results)})
+                    save_user_results(USER_EMAIL, results)
+                    persistence_ok = True
                     st.caption(f"Saved — {len(db_result['new'])} new, {len(db_result['updated'])} updated")
                 except Exception as e:
-                    st.caption(f"Database save failed: {e}")
+                    st.error(f"Results loaded, but could not be saved: {e}")
 
-            if new_profiles and notify_email and prefs.get("notify_on_new_match", True):
+            if persistence_ok and new_profiles and notify_email and prefs.get("notify_on_new_match", True):
                 delivered = send_new_profiles_email(
                     new_profiles,
                     to_email=notify_email,
@@ -790,7 +819,7 @@ with tab_pipeline:
     st.markdown("""
     <p style="font-size:0.83rem;color:rgba(21,15,58,0.6);margin-top:-0.5rem;margin-bottom:1rem;">
         Everyone you've marked as Interested or Contacted across all searches.
-        These people are monitored daily for meaningful new GitHub activity.
+        Choose daily, weekly, or no-email monitoring for each person.
     </p>
     """, unsafe_allow_html=True)
 
@@ -896,22 +925,24 @@ with tab_pipeline:
         st.markdown("")
 
         for person in pipeline:
-            handle = person.get("handle", "")
+            handle_raw = person.get("handle", "")
+            handle = safe_text(handle_raw)
             status = person.get("_status", "")
-            note = person.get("_note", "")
-            updated = person.get("_action_updated", "")
-            github_url = person.get("github_url") or f"https://github.com/{handle}"
-            linkedin_url = person.get("linkedin_url", "")
-            name = person.get("name") or handle
-            bio = person.get("bio") or ""
-            company = person.get("company") or ""
+            note = safe_text(person.get("_note", ""))
+            updated = safe_text(person.get("_action_updated", ""))
+            github_url = safe_url(person.get("github_url"), f"https://github.com/{handle_raw}")
+            linkedin_url = safe_url(person.get("linkedin_url", ""))
+            name = safe_text(person.get("name") or handle_raw)
+            bio = safe_text(person.get("bio") or "")
+            company = safe_text(person.get("company") or "")
             score = person.get("signal_score") or 0
             badges = person.get("founder_badges") or ""
+            notify_frequency = person.get("_notify_frequency") or "daily"
             _, status_fg, status_bg = _STATUS_LABELS.get(status, _STATUS_LABELS["none"])
             status_label = _STATUS_LABELS.get(status, _STATUS_LABELS["none"])[0]
 
             li_html = f'<a href="{linkedin_url}" target="_blank" style="font-size:0.72rem;color:#0a66c2;font-weight:600;text-decoration:none;background:#e8f0fb;padding:2px 8px;border-radius:6px">&#128279; LinkedIn</a>' if linkedin_url else ""
-            badge_html = "".join(f'<span class="badge">{b.strip()}</span>' for b in str(badges).split("|") if b.strip())
+            badge_html = "".join(f'<span class="badge">{safe_text(b.strip())}</span>' for b in str(badges).split("|") if b.strip())
             note_html = f'<div style="font-size:0.78rem;color:#6b7280;margin-top:6px;padding:4px 8px;background:#f9fafb;border-radius:6px;border-left:2px solid #e5e7eb">📝 {note}</div>' if note else ""
 
             st.markdown(f"""
@@ -939,10 +970,30 @@ with tab_pipeline:
             </div>
             """, unsafe_allow_html=True)
 
-            person_activity = activity_by_handle.get(handle, [])
+            cadence_options = ["daily", "weekly", "off"]
+            cadence = st.selectbox(
+                f"Alerts for @{handle_raw}",
+                cadence_options,
+                index=cadence_options.index(notify_frequency)
+                if notify_frequency in cadence_options else 0,
+                format_func=lambda value: {
+                    "daily": "Daily when something changes",
+                    "weekly": "Weekly check-in",
+                    "off": "Track without email",
+                }[value],
+                key=f"monitoring_{handle_raw}",
+            )
+            if cadence != notify_frequency:
+                if set_candidate_monitoring(USER_EMAIL, handle_raw, cadence):
+                    st.session_state.pop("pipeline_data", None)
+                    st.rerun()
+                else:
+                    st.error("Could not update monitoring. Apply the latest database migration and try again.")
+
+            person_activity = activity_by_handle.get(handle_raw, [])
             if person_activity:
                 with st.expander(
-                    f"Recent GitHub activity — @{handle}",
+                    f"Recent GitHub activity — @{handle_raw}",
                     expanded=False,
                 ):
                     for event in person_activity[:5]:
@@ -954,8 +1005,8 @@ with tab_pipeline:
                             st.write(f"• {change}")
             elif status in ("interested", "contacted"):
                 st.caption(
-                    f"Monitoring @{handle}. A baseline is created on the next "
-                    "daily scheduler run."
+                    f"Monitoring @{handle_raw}. A baseline is created on the next "
+                    "scheduled run."
                 )
 
         st.markdown("")
@@ -976,7 +1027,7 @@ with tab_saved:
     st.markdown('<div class="section-header">Your Saved Searches</div>', unsafe_allow_html=True)
     st.markdown("""
     <p style="font-size:0.83rem;color:rgba(21,15,58,0.6);margin-top:-0.5rem;margin-bottom:1rem;">
-        Saved searches run automatically via the scheduler (<code>python3 scheduler.py</code>) and notify you when new candidates match.
+        Saved searches run automatically and notify you when new candidates match.
     </p>
     """, unsafe_allow_html=True)
 
@@ -993,15 +1044,19 @@ with tab_saved:
         for s in saved:
             last_run = s.get("last_run_at", "")[:10] if s.get("last_run_at") else "Never"
             notify_icon = "🔔" if s.get("notify_on_new") else "🔕"
+            saved_name = safe_text(s.get("name", ""))
+            saved_mode = safe_text(s.get("mode", ""))
+            saved_intent = safe_text(s.get("intent", ""))
+            last_run_safe = safe_text(last_run)
             col_a, col_b, col_c = st.columns([5, 1.2, 1])
             with col_a:
                 st.markdown(f"""
                 <div class="saved-card">
-                    <div style="font-weight:700;color:#150F3A;font-size:0.95rem;">{s['name']}</div>
+                    <div style="font-weight:700;color:#150F3A;font-size:0.95rem;">{saved_name}</div>
                     <div style="font-size:0.75rem;color:#737368;margin-top:0.2rem;">
-                        {s['mode']} · {notify_icon} notify on new · Last run: {last_run} · {s.get('last_result_count',0)} results
+                        {saved_mode} · {notify_icon} notify on new · Last run: {last_run_safe} · {s.get('last_result_count',0)} results
                     </div>
-                    <div style="font-size:0.78rem;color:#0083FF;margin-top:0.3rem;">"{s['intent']}"</div>
+                    <div style="font-size:0.78rem;color:#0083FF;margin-top:0.3rem;">"{saved_intent}"</div>
                 </div>
                 """, unsafe_allow_html=True)
             with col_b:
@@ -1025,8 +1080,10 @@ with tab_saved:
                         st.info("The run completed successfully with 0 results.")
             with col_c:
                 if st.button("🗑 Delete", key=f"del_{s['search_id']}"):
-                    delete_saved_search(s["search_id"], USER_EMAIL)
-                    st.rerun()
+                    if delete_saved_search(s["search_id"], USER_EMAIL):
+                        st.rerun()
+                    else:
+                        st.error("Could not delete this saved search. Please try again.")
 
     st.markdown("---")
     st.markdown("#### Add New Saved Search")
@@ -1055,17 +1112,49 @@ with tab_saved:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB: Breakouts
+# TAB: Radar
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_breakout:
-    st.markdown('<div class="section-header">🚀 Breakout Candidates</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Radar</div>', unsafe_allow_html=True)
     st.markdown("""
     <p style="font-size:0.83rem;color:rgba(21,15,58,0.6);margin-top:-0.5rem;margin-bottom:1rem;">
-        GitHub profiles that have 3x'd their followers or repo stars recently —
-        people gaining momentum fast, before they're on anyone's radar.
-        Snapshots are recorded on every scan run; accuracy improves over time.
+        A concise view of who just entered a saved search and what changed
+        for people in your Pipeline.
     </p>
     """, unsafe_allow_html=True)
+
+    radar_events = get_radar_events(USER_EMAIL, limit=20)
+    if radar_events:
+        st.markdown("#### Why now")
+        for event in radar_events[:8]:
+            created = safe_text(
+                (event.get("created_at") or "")[:16].replace("T", " ")
+            )
+            title = safe_text(event.get("title") or "New signal")
+            summary = safe_text(event.get("summary") or "")
+            handles = ", ".join(
+                f"@{safe_text(handle)}" for handle in event.get("handles") or []
+            )
+            detail = summary or handles
+            st.markdown(
+                f"""
+                <div class="history-row">
+                    <strong style="color:#150F3A;">{title}</strong>
+                    <span style="color:#737368;margin-left:0.6rem;font-size:0.75rem;">{created}</span>
+                    {f'<div style="font-size:0.78rem;color:#6b7280;margin-top:3px">{detail}</div>' if detail else ''}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption(
+            "New saved-search matches and meaningful Pipeline activity will appear here."
+        )
+
+    st.markdown("#### Momentum scan")
+    st.caption(
+        "Profiles whose followers or repo stars are accelerating. Accuracy improves as snapshots accumulate."
+    )
 
     bo_col1, bo_col2, bo_col3 = st.columns([1, 1, 2])
     with bo_col1:
@@ -1109,8 +1198,8 @@ with tab_breakout:
         st.markdown("")
 
         for b in breakouts:
-            handle = b["handle"]
-            url = b["github_url"]
+            handle = safe_text(b["handle"])
+            url = safe_url(b["github_url"])
             f_mult = b["follower_mult"]
             s_mult = b["star_mult"]
             signal = "🚀 Follower surge" if f_mult >= s_mult else "⭐ Star surge"
@@ -1153,7 +1242,7 @@ with tab_breakout:
                     </div>
                     <div>
                         <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.07em;color:#737368;">Tracked Since</div>
-                        <div style="font-weight:700;color:#150F3A;">{b['first_seen']}</div>
+                        <div style="font-weight:700;color:#150F3A;">{safe_text(b['first_seen'])}</div>
                     </div>
                 </div>
             </div>
@@ -1198,11 +1287,15 @@ with tab_history:
             ran_at = (run.get("ran_at") or "")[:16].replace("T", " ")
             triggered = run.get("triggered_by", "manual")
             trigger_icon = "🤖" if triggered == "scheduler" else "👤"
+            run_intent = safe_text(run.get("intent", ""))
+            run_mode = safe_text(run.get("mode", ""))
+            run_triggered = safe_text(triggered)
+            run_time = safe_text(ran_at)
             st.markdown(f"""
             <div class="history-row">
-                <strong style="color:#150F3A;">{run.get('intent','')}</strong>
+                <strong style="color:#150F3A;">{run_intent}</strong>
                 <span style="color:#737368;margin-left:0.75rem;font-size:0.75rem;">
-                    {run.get('mode','')} · {trigger_icon} {triggered} · {ran_at} · {run.get('result_count',0)} results
+                    {run_mode} · {trigger_icon} {run_triggered} · {run_time} · {run.get('result_count',0)} results
                 </span>
             </div>
             """, unsafe_allow_html=True)
@@ -1310,8 +1403,8 @@ with tab_settings:
     st.markdown('<div class="section-header">Account</div>', unsafe_allow_html=True)
     st.markdown(f"""
     <div style="background:white;border-radius:12px;padding:1.25rem 1.5rem;border:1px solid #E8E8EC;font-size:0.85rem;">
-        <div style="font-weight:600;color:#150F3A;">{USER_NAME}</div>
-        <div style="color:#737368;">{USER_EMAIL}</div>
+        <div style="font-weight:600;color:#150F3A;">{SAFE_USER_NAME}</div>
+        <div style="color:#737368;">{SAFE_USER_EMAIL}</div>
     </div>
     """, unsafe_allow_html=True)
     st.markdown("")

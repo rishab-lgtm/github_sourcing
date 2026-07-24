@@ -13,8 +13,10 @@ Or manually:
 from __future__ import annotations
 
 import logging
+import os
 import sys
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -25,6 +27,47 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
+
+
+def _write_confirmed(result) -> bool:
+    """Mocks/legacy adapters may return None; only an explicit False is failure."""
+    return result is not False
+
+
+def _weekly_watch_due(previous: dict, now: datetime | None = None) -> bool:
+    recorded_at = previous.get("_recorded_at")
+    if not recorded_at:
+        return True
+    try:
+        recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+        if recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    now = now or datetime.now(timezone.utc)
+    return (now - recorded).days >= 7
+
+
+@contextmanager
+def scheduler_lock(path: str | None = None):
+    """Prevent two scheduler processes on the same service from overlapping."""
+    import fcntl
+
+    lock_path = path or os.environ.get(
+        "SCHEDULER_LOCK_PATH", "/tmp/m13-github-sourcing-scheduler.lock"
+    )
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
 
 
 def _watch_snapshot(profile: dict, recent_repos: list) -> dict:
@@ -169,10 +212,15 @@ def run_watched_people(send_fn=None) -> dict:
         formatted, current = profile_cache[handle]
         previous = get_latest_watch_snapshot(user_email, handle)
         changes = detect_watched_changes(previous, current)
+        frequency = (action.get("notify_frequency") or "daily").lower()
 
         if not previous:
-            record_watch_snapshot(user_email, current)
+            if not _write_confirmed(record_watch_snapshot(user_email, current)):
+                log.error("Could not persist monitoring baseline for @%s", handle)
             audit(user_email, "person_watch_started", {"handle": handle})
+            continue
+
+        if frequency == "weekly" and not _weekly_watch_due(previous):
             continue
 
         if not changes:
@@ -180,19 +228,37 @@ def run_watched_people(send_fn=None) -> dict:
             continue
 
         changed_count += 1
-        prefs = get_notification_prefs(user_email)
-        notify_email = prefs.get("notify_email") or user_email
-        delivered = send_fn(formatted, changes, to_email=notify_email)
-        record_watch_activity(user_email, {
+        activity = {
             "handle": handle,
             "name": formatted.get("name") or handle,
             "github_url": formatted.get("github_url") or f"https://github.com/{handle}",
             "changes": changes,
-            "notified": delivered,
-        })
+            "notified": False,
+            "frequency": frequency,
+        }
+        if frequency == "off":
+            if _write_confirmed(record_watch_activity(user_email, activity)):
+                record_watch_snapshot(user_email, current)
+            continue
+
+        if not _write_confirmed(record_watch_activity(user_email, activity)):
+            log.error(
+                "Skipping alert for @%s because activity could not be recorded",
+                handle,
+            )
+            continue
+
+        prefs = get_notification_prefs(user_email)
+        notify_email = prefs.get("notify_email") or user_email
+        delivered = send_fn(formatted, changes, to_email=notify_email)
         if delivered:
             notified_count += 1
             record_watch_snapshot(user_email, current)
+            audit(user_email, "person_watch_notification_sent", {
+                "handle": handle,
+                "change_count": len(changes),
+                "frequency": frequency,
+            })
         else:
             audit(user_email, "person_watch_notification_failed", {
                 "handle": handle,
@@ -209,11 +275,11 @@ def run_watched_people(send_fn=None) -> dict:
 def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler") -> dict:
     """Run exactly one saved search; isolated for cron and integration testing."""
     from database import (
-        get_service_client,
         upsert_profiles,
         create_search_run,
         update_search_run_count,
         record_matches,
+        mark_matches_notified,
         record_snapshots,
         update_saved_search_last_run,
         get_notified_handles_for_search,
@@ -225,7 +291,6 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
     from notifications import send_new_profiles_email
 
     send_fn = send_fn or send_new_profiles_email
-    client = get_service_client()
     search_id = search["search_id"]
     user_email = search["user_email"]
     intent = search["intent"]
@@ -242,10 +307,14 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
         saved_search_id=search_id,
         triggered_by=triggered_by,
     )
+    if not run_id:
+        raise RuntimeError("Could not create a durable record for this search run")
     results = execute_search(SearchConfig.from_saved_search(search))
     if not results:
-        update_search_run_count(run_id, 0)
-        update_saved_search_last_run(search_id, 0)
+        if not _write_confirmed(update_search_run_count(run_id, 0)):
+            raise RuntimeError("Could not finalize the empty search run")
+        if not _write_confirmed(update_saved_search_last_run(search_id, 0)):
+            raise RuntimeError("Could not update the saved search status")
         audit(user_email, "saved_search_run", {
             "search_name": search["name"],
             "result_count": 0,
@@ -264,11 +333,16 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
         profile for profile in results
         if profile["handle"] not in notified_handles
     ]
-    upsert_profiles(results)
-    record_matches(run_id, results, source_query=intent)
+    profile_write = upsert_profiles(results)
+    if profile_write.get("persisted") is False:
+        raise RuntimeError("Could not persist candidate profiles")
+    if not _write_confirmed(record_matches(run_id, results, source_query=intent)):
+        raise RuntimeError("Could not persist candidate matches")
     record_snapshots(results)
-    update_search_run_count(run_id, len(results))
-    update_saved_search_last_run(search_id, len(results))
+    if not _write_confirmed(update_search_run_count(run_id, len(results))):
+        raise RuntimeError("Could not finalize the search run")
+    if not _write_confirmed(update_saved_search_last_run(search_id, len(results))):
+        raise RuntimeError("Could not update the saved search status")
 
     notified = False
     if new_profiles and search.get("notify_on_new", True):
@@ -277,17 +351,21 @@ def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler"
         if prefs.get("notify_on_new_match", True):
             notified = send_fn(new_profiles, to_email=notify_email)
             if notified:
-                now = datetime.utcnow().isoformat()
                 new_handles = [profile["handle"] for profile in new_profiles]
-                client.table("candidate_matches").update({"notified_at": now}).eq(
-                    "run_id", run_id
-                ).in_("handle", new_handles).execute()
                 audit(user_email, "notification_sent", {
+                    "search_id": search_id,
+                    "run_id": run_id,
                     "search_name": search["name"],
+                    "handles": new_handles,
                     "new_count": len(new_profiles),
                     "notify_email": notify_email,
                     "triggered_by": triggered_by,
                 })
+                if not mark_matches_notified(run_id, new_handles):
+                    log.warning(
+                        "Email delivered for '%s', but match receipts need repair",
+                        search["name"],
+                    )
             else:
                 audit(user_email, "notification_failed", {
                     "search_name": search["name"],
@@ -375,4 +453,8 @@ def run_all_saved_searches():
 
 
 if __name__ == "__main__":
-    run_all_saved_searches()
+    with scheduler_lock() as acquired:
+        if acquired:
+            run_all_saved_searches()
+        else:
+            log.warning("Another scheduler run is already active; exiting cleanly.")

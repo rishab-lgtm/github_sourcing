@@ -65,9 +65,9 @@ def upsert_user(email: str, name: str = "") -> bool:
 # ── Candidates ────────────────────────────────────────────────────────────────
 
 def upsert_profiles(profiles: list) -> dict:
-    """Insert new profiles, update existing ones. Returns {new, updated}."""
+    """Insert or update profiles and report whether the write was confirmed."""
     if not profiles:
-        return {"new": [], "updated": []}
+        return {"new": [], "updated": [], "persisted": True}
 
     client = get_client()
     now = datetime.utcnow().isoformat()
@@ -118,8 +118,17 @@ def upsert_profiles(profiles: list) -> dict:
             client.table("candidates").upsert(all_records, on_conflict="handle").execute()
         except Exception as e:
             log.warning("upsert_profiles failed: %s", e)
+            return {
+                "new": new_profiles,
+                "updated": updated_profiles,
+                "persisted": False,
+            }
 
-    return {"new": new_profiles, "updated": updated_profiles}
+    return {
+        "new": new_profiles,
+        "updated": updated_profiles,
+        "persisted": True,
+    }
 
 
 def get_all_candidates(limit: int = 500) -> list:
@@ -183,32 +192,36 @@ def get_saved_searches(user_email: str) -> list:
         return []
 
 
-def delete_saved_search(search_id: str, user_email: str):
+def delete_saved_search(search_id: str, user_email: str) -> bool:
     user_email = _require_user_email(user_email)
     client = get_client()
     try:
         client.table("saved_searches").delete().eq("search_id", search_id).eq("user_email", user_email).execute()
         audit(user_email, "saved_search_deleted", {"search_id": search_id})
+        return True
     except Exception as e:
         log.warning("delete_saved_search: %s", e)
+        return False
 
 
-def update_saved_search_last_run(search_id: str, result_count: int):
+def update_saved_search_last_run(search_id: str, result_count: int) -> bool:
     client = get_client()
     try:
         client.table("saved_searches").update({
             "last_run_at": datetime.utcnow().isoformat(),
             "last_result_count": result_count,
         }).eq("search_id", search_id).execute()
+        return True
     except Exception as e:
         log.warning("update_saved_search_last_run: %s", e)
+        return False
 
 
 # ── Search runs ───────────────────────────────────────────────────────────────
 
 def create_search_run(user_email: str, intent: str, mode: str,
                       filters: dict = None, saved_search_id: str = None,
-                      triggered_by: str = "manual") -> str:
+                      triggered_by: str = "manual") -> str | None:
     user_email = _require_user_email(user_email)
     run_id = str(uuid.uuid4())
     client = get_client()
@@ -226,20 +239,23 @@ def create_search_run(user_email: str, intent: str, mode: str,
         }).execute()
     except Exception as e:
         log.warning("create_search_run failed: %s", e)
+        return None
     return run_id
 
 
-def update_search_run_count(run_id: str, count: int):
+def update_search_run_count(run_id: str, count: int) -> bool:
     client = get_client()
     try:
         client.table("search_runs").update({"result_count": count}).eq("run_id", run_id).execute()
+        return True
     except Exception as e:
         log.warning("update_search_run_count: %s", e)
+        return False
 
 
-def record_matches(run_id: str, profiles: list, source_query: str = ""):
+def record_matches(run_id: str, profiles: list, source_query: str = "") -> bool:
     if not profiles:
-        return
+        return True
     client = get_client()
     now = datetime.utcnow().isoformat()
     records = [
@@ -259,6 +275,24 @@ def record_matches(run_id: str, profiles: list, source_query: str = ""):
             client.table("candidate_matches").upsert(records, on_conflict="run_id,handle").execute()
         except Exception as e:
             log.warning("record_matches failed: %s", e)
+            return False
+    return True
+
+
+def mark_matches_notified(run_id: str, handles: list[str]) -> bool:
+    """Mark a delivered alert only after the email provider confirms success."""
+    handles = [handle for handle in handles if handle]
+    if not handles:
+        return True
+    try:
+        client = get_client()
+        client.table("candidate_matches").update({
+            "notified_at": datetime.utcnow().isoformat(),
+        }).eq("run_id", run_id).in_("handle", handles).execute()
+        return True
+    except Exception as e:
+        log.warning("mark_matches_notified failed: %s", e)
+        return False
 
 
 def get_run_history(user_email: str, limit: int = 20) -> list:
@@ -310,10 +344,26 @@ def get_notified_handles_for_search(saved_search_id: str) -> set:
             client.table("candidate_matches").select("handle,notified_at")
             .in_("run_id", run_ids).execute().data or []
         )
-        return {m["handle"] for m in matches if m.get("notified_at")}
+        handles = {m["handle"] for m in matches if m.get("notified_at")}
     except Exception as e:
         log.warning("get_notified_handles_for_search: %s", e)
         return set()
+
+    # The audit record is a second durable receipt. It prevents a duplicate
+    # alert if Resend succeeds but the candidate_matches update fails. Failure
+    # to read this fallback must not discard the primary match receipts above.
+    try:
+        receipts = (
+            client.table("audit_log").select("detail")
+            .eq("action", "notification_sent")
+            .contains("detail", {"search_id": saved_search_id})
+            .execute().data or []
+        )
+        for receipt in receipts:
+            handles.update((receipt.get("detail") or {}).get("handles") or [])
+    except Exception as e:
+        log.warning("notification receipt fallback unavailable: %s", e)
+    return handles
 
 
 # ── Notification preferences ──────────────────────────────────────────────────
@@ -362,7 +412,7 @@ def save_notification_prefs(user_email: str, notify_email: str,
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
-def audit(user_email: str, action: str, detail: dict = None):
+def audit(user_email: str, action: str, detail: dict = None) -> bool:
     client = get_client()
     try:
         client.table("audit_log").insert({
@@ -371,8 +421,10 @@ def audit(user_email: str, action: str, detail: dict = None):
             "detail": detail or {},
             "created_at": datetime.utcnow().isoformat(),
         }).execute()
+        return True
     except Exception as e:
         log.debug("audit log failed (non-critical): %s", e)
+        return False
 
 
 # ── Per-user result cache (file-based, namespaced by email) ───────────────────
@@ -479,6 +531,7 @@ def get_user_pipeline(user_email: str, statuses: list = None) -> list:
             profile["_status"] = action["status"]
             profile["_note"] = action.get("note", "")
             profile["_action_updated"] = action.get("updated_at", "")[:10]
+            profile["_notify_frequency"] = action.get("notify_frequency", "daily")
             result.append(profile)
         return result
     except Exception as e:
@@ -501,6 +554,29 @@ def get_all_watched_actions() -> list:
         return []
 
 
+def set_candidate_monitoring(user_email: str, handle: str, frequency: str) -> bool:
+    """Set person-alert cadence without changing their pipeline status or note."""
+    user_email = _require_user_email(user_email)
+    handle = (handle or "").strip().lower()
+    frequency = (frequency or "").strip().lower()
+    if frequency not in {"daily", "weekly", "off"}:
+        raise ValueError("Monitoring frequency must be daily, weekly, or off")
+    client = get_client()
+    try:
+        client.table("candidate_actions").update({
+            "notify_frequency": frequency,
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("user_email", user_email).eq("handle", handle).execute()
+        audit(user_email, "candidate_monitoring_updated", {
+            "handle": handle,
+            "frequency": frequency,
+        })
+        return True
+    except Exception as e:
+        log.warning("set_candidate_monitoring: %s", e)
+        return False
+
+
 def get_latest_watch_snapshot(user_email: str, handle: str) -> dict:
     """Return the latest monitoring baseline for one user/person pair."""
     user_email = _require_user_email(user_email)
@@ -516,20 +592,25 @@ def get_latest_watch_snapshot(user_email: str, handle: str) -> dict:
             .contains("detail", {"handle": handle})
             .order("created_at", desc=True).limit(1).execute().data or []
         )
-        return rows[0].get("detail", {}) if rows else {}
+        if not rows:
+            return {}
+        return {
+            **(rows[0].get("detail") or {}),
+            "_recorded_at": rows[0].get("created_at", ""),
+        }
     except Exception as e:
         log.warning("get_latest_watch_snapshot: %s", e)
         return {}
 
 
-def record_watch_snapshot(user_email: str, snapshot: dict):
+def record_watch_snapshot(user_email: str, snapshot: dict) -> bool:
     user_email = _require_user_email(user_email)
-    audit(user_email, "person_watch_snapshot", snapshot)
+    return audit(user_email, "person_watch_snapshot", snapshot)
 
 
-def record_watch_activity(user_email: str, detail: dict):
+def record_watch_activity(user_email: str, detail: dict) -> bool:
     user_email = _require_user_email(user_email)
-    audit(user_email, "person_watch_activity", detail)
+    return audit(user_email, "person_watch_activity", detail)
 
 
 def get_watch_activity(user_email: str, limit: int = 100) -> list:
@@ -552,6 +633,46 @@ def get_watch_activity(user_email: str, limit: int = 100) -> list:
         return []
 
 
+def get_radar_events(user_email: str, limit: int = 40) -> list:
+    """Return a compact, user-owned feed of new matches and watched activity."""
+    user_email = _require_user_email(user_email)
+    try:
+        client = get_client()
+        rows = (
+            client.table("audit_log").select("action,detail,created_at")
+            .eq("user_email", user_email)
+            .in_("action", ["notification_sent", "person_watch_activity"])
+            .order("created_at", desc=True).limit(limit).execute().data or []
+        )
+    except Exception as e:
+        log.warning("get_radar_events: %s", e)
+        return []
+
+    events = []
+    for row in rows:
+        detail = row.get("detail") or {}
+        if row.get("action") == "person_watch_activity":
+            changes = detail.get("changes") or []
+            events.append({
+                "kind": "person",
+                "title": f"@{detail.get('handle', 'profile')} changed",
+                "summary": " · ".join(changes[:3]),
+                "url": detail.get("github_url") or "",
+                "created_at": row.get("created_at", ""),
+            })
+        else:
+            handles = detail.get("handles") or []
+            count = detail.get("new_count") or len(handles)
+            events.append({
+                "kind": "space",
+                "title": f"{count} new match{'es' if count != 1 else ''}",
+                "summary": detail.get("search_name") or "Saved search",
+                "handles": handles[:5],
+                "created_at": row.get("created_at", ""),
+            })
+    return events
+
+
 # ── Velocity / snapshot tracking ──────────────────────────────────────────────
 
 def _top_repo_stars(top_repos_str: str) -> int:
@@ -559,10 +680,10 @@ def _top_repo_stars(top_repos_str: str) -> int:
     return sum(int(s) for s in re.findall(r'\((\d+)⭐\)', top_repos_str or ""))
 
 
-def record_snapshots(profiles: list):
+def record_snapshots(profiles: list) -> bool:
     """Write one snapshot row per profile. Call after each scheduler/scan run."""
     if not profiles:
-        return
+        return True
     client = get_client()
     now = datetime.utcnow().isoformat()
     rows = [
@@ -578,8 +699,10 @@ def record_snapshots(profiles: list):
     ]
     try:
         client.table("candidate_snapshots").insert(rows).execute()
+        return True
     except Exception as e:
         log.warning("record_snapshots failed: %s", e)
+        return False
 
 
 def get_snapshots_for_handle(handle: str, limit: int = 30) -> list:

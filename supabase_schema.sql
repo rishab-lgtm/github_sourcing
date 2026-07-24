@@ -115,11 +115,20 @@ create table if not exists candidate_actions (
     handle text not null,
     status text not null default 'none',  -- 'none' | 'interested' | 'contacted' | 'passed'
     note text default '',
+    notify_frequency text not null default 'daily'
+        check (notify_frequency in ('daily', 'weekly', 'off')),
     updated_at timestamptz default now(),
     unique(user_email, handle)
 );
 create index if not exists idx_candidate_actions_user on candidate_actions(user_email, status);
 alter table candidate_actions enable row level security;
+alter table candidate_actions
+    add column if not exists notify_frequency text not null default 'daily';
+alter table candidate_actions
+    drop constraint if exists candidate_actions_notify_frequency_check;
+alter table candidate_actions
+    add constraint candidate_actions_notify_frequency_check
+    check (notify_frequency in ('daily', 'weekly', 'off'));
 
 -- ── Indexes ──────────────────────────────────────────────────────────────────
 create index if not exists idx_saved_searches_user on saved_searches(user_email);
