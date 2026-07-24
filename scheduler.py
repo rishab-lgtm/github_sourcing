@@ -27,7 +27,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def run_saved_search(search: dict, send_fn=None) -> dict:
+def run_saved_search(search: dict, send_fn=None, triggered_by: str = "scheduler") -> dict:
     """Run exactly one saved search; isolated for cron and integration testing."""
     from database import (
         get_service_client,
@@ -37,7 +37,7 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
         record_matches,
         record_snapshots,
         update_saved_search_last_run,
-        get_prior_handles_for_search,
+        get_notified_handles_for_search,
         get_notification_prefs,
         audit,
     )
@@ -55,20 +55,36 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
 
     log.info("Running saved search '%s' for %s (mode=%s)", search["name"], user_email, mode)
     set_current_user(user_email)
-    results = execute_search(SearchConfig.from_saved_search(search))
-    if not results:
-        return {"result_count": 0, "new_count": 0, "notified": False}
-
-    prior_handles = get_prior_handles_for_search(search_id)
-    new_profiles = [profile for profile in results if profile["handle"] not in prior_handles]
     run_id = create_search_run(
         user_email=user_email,
         intent=intent,
         mode=mode,
         filters=filters,
         saved_search_id=search_id,
-        triggered_by="scheduler",
+        triggered_by=triggered_by,
     )
+    results = execute_search(SearchConfig.from_saved_search(search))
+    if not results:
+        update_search_run_count(run_id, 0)
+        update_saved_search_last_run(search_id, 0)
+        audit(user_email, "saved_search_run", {
+            "search_name": search["name"],
+            "result_count": 0,
+            "new_count": 0,
+            "triggered_by": triggered_by,
+        })
+        return {
+            "run_id": run_id,
+            "result_count": 0,
+            "new_count": 0,
+            "notified": False,
+        }
+
+    notified_handles = get_notified_handles_for_search(search_id)
+    new_profiles = [
+        profile for profile in results
+        if profile["handle"] not in notified_handles
+    ]
     upsert_profiles(results)
     record_matches(run_id, results, source_query=intent)
     record_snapshots(results)
@@ -76,7 +92,7 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
     update_saved_search_last_run(search_id, len(results))
 
     notified = False
-    if new_profiles:
+    if new_profiles and search.get("notify_on_new", True):
         prefs = get_notification_prefs(user_email)
         notify_email = prefs.get("notify_email") or user_email
         if prefs.get("notify_on_new_match", True):
@@ -91,8 +107,23 @@ def run_saved_search(search: dict, send_fn=None) -> dict:
                     "search_name": search["name"],
                     "new_count": len(new_profiles),
                     "notify_email": notify_email,
-                    "triggered_by": "scheduler",
+                    "triggered_by": triggered_by,
                 })
+            else:
+                audit(user_email, "notification_failed", {
+                    "search_name": search["name"],
+                    "new_count": len(new_profiles),
+                    "notify_email": notify_email,
+                    "triggered_by": triggered_by,
+                })
+
+    audit(user_email, "saved_search_run", {
+        "search_name": search["name"],
+        "result_count": len(results),
+        "new_count": len(new_profiles),
+        "notified": notified,
+        "triggered_by": triggered_by,
+    })
 
     return {
         "run_id": run_id,

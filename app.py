@@ -11,7 +11,12 @@ import streamlit as st
 from datetime import datetime, timedelta
 
 from streamlit_auth import check_auth, show_login_page, logout
-from notifications import send_new_profiles_email, send_recap_email, send_weekly_digest
+from notifications import (
+    send_new_profiles_email,
+    send_recap_email,
+    send_weekly_digest,
+    send_test_email,
+)
 from github_sourcing import (
     find_sf_ai_contributors,
     find_trending_repo_authors,
@@ -35,7 +40,6 @@ from database import (
     save_search,
     get_saved_searches,
     delete_saved_search,
-    get_prior_handles_for_search,
     get_notification_prefs,
     save_notification_prefs,
     get_breakout_candidates,
@@ -291,21 +295,39 @@ def render_profile_card(row: dict, is_new: bool = False):
                     use_container_width=True,
                 )
                 if pressed and current_status != st_key:
-                    set_candidate_action(USER_EMAIL, handle, st_key, current_note)
-                    st.session_state["candidate_actions"][handle] = {"status": st_key, "note": current_note}
-                    st.rerun()
+                    if set_candidate_action(USER_EMAIL, handle, st_key, current_note):
+                        st.session_state["candidate_actions"][handle] = {
+                            "status": st_key,
+                            "note": current_note,
+                        }
+                        st.session_state.pop("pipeline_data", None)
+                        st.rerun()
+                    else:
+                        st.error("Could not save this status. Please try again.")
         if current_status != "none":
             if btn_cols[3].button("Clear", key=f"status_{handle}_clear", use_container_width=True):
-                set_candidate_action(USER_EMAIL, handle, "none", "")
-                st.session_state["candidate_actions"][handle] = {"status": "none", "note": ""}
-                st.rerun()
+                if set_candidate_action(USER_EMAIL, handle, "none", ""):
+                    st.session_state["candidate_actions"][handle] = {
+                        "status": "none",
+                        "note": "",
+                    }
+                    st.session_state.pop("pipeline_data", None)
+                    st.rerun()
+                else:
+                    st.error("Could not clear this status. Please try again.")
         note_val = st.text_input(
             "Note", value=current_note, placeholder="Add context, meeting notes…",
             key=f"note_{handle}", label_visibility="collapsed",
         )
         if note_val != current_note:
-            set_candidate_action(USER_EMAIL, handle, current_status, note_val)
-            st.session_state["candidate_actions"][handle] = {"status": current_status, "note": note_val}
+            if set_candidate_action(USER_EMAIL, handle, current_status, note_val):
+                st.session_state["candidate_actions"][handle] = {
+                    "status": current_status,
+                    "note": note_val,
+                }
+                st.session_state.pop("pipeline_data", None)
+            else:
+                st.error("Could not save this note. Please try again.")
 
 
 def apply_filters(df: pd.DataFrame, prev_handles: set = None,
@@ -525,7 +547,7 @@ with tab_search:
             col_sv, col_cx = st.columns([1, 4])
             with col_sv:
                 if st.button("Save", type="primary", key="qs_submit"):
-                    save_search(
+                    saved_id = save_search(
                         user_email=USER_EMAIL,
                         name=qs_name.strip() or st.session_state.get("_save_intent", ""),
                         intent=st.session_state.get("_save_intent", ""),
@@ -533,9 +555,12 @@ with tab_search:
                         filters={"region": region, "bio_keyword": bio_keyword},
                         notify_on_new=qs_notify,
                     )
-                    st.session_state["_show_save_form"] = False
-                    st.success(f"Saved '{qs_name}'! Go to Saved Searches to see it.")
-                    st.rerun()
+                    if saved_id:
+                        st.session_state["_show_save_form"] = False
+                        st.success(f"Saved '{qs_name}'! Go to Saved Searches to see it.")
+                        st.rerun()
+                    else:
+                        st.error("Could not save this search. Please try again.")
             with col_cx:
                 if st.button("Cancel", key="qs_cancel"):
                     st.session_state["_show_save_form"] = False
@@ -552,10 +577,26 @@ with tab_search:
                 if not new_candidates:
                     st.info("No new candidates in the last 7 days.")
                 else:
-                    for email in DIGEST_RECIPIENTS:
-                        send_weekly_digest(new_profiles=new_candidates, all_profiles=all_candidates, to_email=email)
-                    audit(USER_EMAIL, "digest_sent", {"count": len(new_candidates)})
-                    st.success(f"Weekly digest sent to Brent & Thomas — {len(new_candidates)} new candidates.")
+                    deliveries = [
+                        send_weekly_digest(
+                            new_profiles=new_candidates,
+                            all_profiles=all_candidates,
+                            to_email=email,
+                        )
+                        for email in DIGEST_RECIPIENTS
+                    ]
+                    if all(deliveries):
+                        audit(USER_EMAIL, "digest_sent", {"count": len(new_candidates)})
+                        st.success(
+                            f"Weekly digest sent to Brent & Thomas — "
+                            f"{len(new_candidates)} new candidates."
+                        )
+                    else:
+                        audit(USER_EMAIL, "digest_failed", {"count": len(new_candidates)})
+                        st.error(
+                            "The weekly digest could not be delivered to every recipient. "
+                            "Check the notification settings."
+                        )
             except Exception as e:
                 st.error(f"Failed: {e}")
 
@@ -612,7 +653,24 @@ with tab_search:
                     st.caption(f"Database save failed: {e}")
 
             if new_profiles and notify_email and prefs.get("notify_on_new_match", True):
-                send_new_profiles_email(new_profiles, to_email=notify_email)
+                delivered = send_new_profiles_email(
+                    new_profiles,
+                    to_email=notify_email,
+                )
+                audit(
+                    USER_EMAIL,
+                    "notification_sent" if delivered else "notification_failed",
+                    {
+                        "new_count": len(new_profiles),
+                        "notify_email": notify_email,
+                        "triggered_by": "manual",
+                    },
+                )
+                if not delivered:
+                    st.warning(
+                        "New candidates were saved, but the notification email "
+                        "could not be delivered."
+                    )
 
             last_recap = load_user_recap(USER_EMAIL)
             if recap_due(recap_frequency, last_recap) and notify_email:
@@ -627,6 +685,11 @@ with tab_search:
                         "sent_at": datetime.now().isoformat(),
                         "handles": [p["handle"] for p in results],
                     })
+                else:
+                    st.warning(
+                        "The scheduled recap was due, but its email could not "
+                        "be delivered."
+                    )
 
             display_results(
                 results, prev_handles,
@@ -653,7 +716,7 @@ with tab_search:
                 notify_toggle = st.checkbox("Email alerts", value=True, key="save_notify")
             if st.button("Save & set up alerts", type="primary", key="do_save"):
                 if save_name.strip():
-                    save_search(
+                    saved_id = save_search(
                         user_email=USER_EMAIL,
                         name=save_name.strip(),
                         intent=scan_label,
@@ -661,7 +724,10 @@ with tab_search:
                         filters={"region": region, "bio_keyword": bio_keyword},
                         notify_on_new=notify_toggle,
                     )
-                    st.success(f"Saved '{save_name}' — it will auto-run and alert you when new people match.")
+                    if saved_id:
+                        st.success(f"Saved '{save_name}' — it will auto-run and alert you when new people match.")
+                    else:
+                        st.error("Could not save this search. Please try again.")
                 else:
                     st.warning("Enter a name first.")
     else:
@@ -698,10 +764,18 @@ with tab_search:
                     notify_toggle2 = st.checkbox("Email alerts", value=True, key="save_notify2")
                 if st.button("Save & set up alerts", type="primary", key="do_save2"):
                     if save_name2.strip():
-                        save_search(user_email=USER_EMAIL, name=save_name2.strip(), intent=scan_label,
-                                    mode=mode, filters={"region": region, "bio_keyword": bio_keyword},
-                                    notify_on_new=notify_toggle2)
-                        st.success(f"Saved '{save_name2}' — will auto-run and alert you when new people match.")
+                        saved_id = save_search(
+                            user_email=USER_EMAIL,
+                            name=save_name2.strip(),
+                            intent=scan_label,
+                            mode=mode,
+                            filters={"region": region, "bio_keyword": bio_keyword},
+                            notify_on_new=notify_toggle2,
+                        )
+                        if saved_id:
+                            st.success(f"Saved '{save_name2}' — will auto-run and alert you when new people match.")
+                        else:
+                            st.error("Could not save this search. Please try again.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -724,11 +798,19 @@ with tab_pipeline:
     with pipe_col2:
         pipe_refresh = st.button("🔄 Refresh", key="pipe_refresh")
 
-    if "pipeline_data" not in st.session_state or pipe_refresh:
+    pipeline_filter_key = tuple(
+        pipe_status_filter or ["interested", "contacted"]
+    )
+    if (
+        "pipeline_data" not in st.session_state
+        or pipe_refresh
+        or st.session_state.get("_pipeline_filter_key") != pipeline_filter_key
+    ):
         try:
             st.session_state["pipeline_data"] = get_user_pipeline(
-                USER_EMAIL, statuses=pipe_status_filter or ["interested", "contacted"]
+                USER_EMAIL, statuses=list(pipeline_filter_key)
             )
+            st.session_state["_pipeline_filter_key"] = pipeline_filter_key
         except Exception as e:
             st.session_state["pipeline_data"] = []
             st.warning(f"Could not load pipeline — run the schema migration first. ({e})")
@@ -843,25 +925,22 @@ with tab_saved:
             with col_b:
                 if st.button("▶ Run now", key=f"run_{s['search_id']}"):
                     with st.spinner(f"Running '{s['name']}'…"):
-                        res = run_search(s["mode"], s["intent"], s.get("filters", {}).get("region", ""))
-                    if res:
-                        prior = get_prior_handles_for_search(s["search_id"])
-                        new_p = [p for p in res if p["handle"] not in prior]
-                        run_id = create_search_run(
-                            user_email=USER_EMAIL, intent=s["intent"], mode=s["mode"],
-                            filters=s.get("filters") or {}, saved_search_id=s["search_id"],
+                        from scheduler import run_saved_search
+                        summary = run_saved_search(s, triggered_by="manual")
+                    if summary["result_count"]:
+                        message = (
+                            f"{summary['result_count']} results — "
+                            f"{summary['new_count']} new notification match(es)"
                         )
-                        upsert_profiles(res)
-                        record_matches(run_id, res, source_query=s["intent"])
-                        update_search_run_count(run_id, len(res))
-                        from database import update_saved_search_last_run
-                        update_saved_search_last_run(s["search_id"], len(res))
-                        st.success(f"{len(res)} results — {len(new_p)} new")
-                        if new_p and s.get("notify_on_new"):
-                            send_new_profiles_email(new_p, to_email=prefs.get("notify_email") or USER_EMAIL)
-                            audit(USER_EMAIL, "notification_sent", {"search": s["name"], "new_count": len(new_p)})
+                        if summary["new_count"] and s.get("notify_on_new"):
+                            if summary["notified"]:
+                                st.success(f"{message}. Email sent.")
+                            else:
+                                st.error(f"{message}, but the email could not be delivered.")
+                        else:
+                            st.success(message)
                     else:
-                        st.warning("No results.")
+                        st.info("The run completed successfully with 0 results.")
             with col_c:
                 if st.button("🗑 Delete", key=f"del_{s['search_id']}"):
                     delete_saved_search(s["search_id"], USER_EMAIL)
@@ -878,14 +957,17 @@ with tab_saved:
         submitted = st.form_submit_button("Save Search", type="primary")
         if submitted:
             if ns_name.strip() and ns_intent.strip():
-                save_search(
+                saved_id = save_search(
                     user_email=USER_EMAIL, name=ns_name.strip(),
                     intent=ns_intent.strip(), mode=ns_mode,
                     filters={"region": ns_region.strip()},
                     notify_on_new=ns_notify,
                 )
-                st.success(f"Saved '{ns_name}'!")
-                st.rerun()
+                if saved_id:
+                    st.success(f"Saved '{ns_name}'!")
+                    st.rerun()
+                else:
+                    st.error("Could not save this search. Please try again.")
             else:
                 st.warning("Name and intent are required.")
 
@@ -998,10 +1080,27 @@ with tab_breakout:
         st.markdown("")
         if st.button("📬 Email breakout list to Brent & Thomas", key="email_breakouts"):
             from notifications import send_breakout_alert
-            for email in ["brent@m13.co", "thomas@m13.co"]:
+            recipients = ["brent@m13.co", "thomas@m13.co"]
+            deliveries = [
                 send_breakout_alert(breakouts, to_email=email)
-            audit(USER_EMAIL, "breakout_alert_sent", {"count": len(breakouts), "triggered_by": "manual"})
-            st.success(f"Breakout alert sent — {len(breakouts)} candidates.")
+                for email in recipients
+            ]
+            if all(deliveries):
+                audit(
+                    USER_EMAIL,
+                    "breakout_alert_sent",
+                    {"count": len(breakouts), "triggered_by": "manual"},
+                )
+                st.success(f"Breakout alert sent — {len(breakouts)} candidates.")
+            else:
+                audit(
+                    USER_EMAIL,
+                    "breakout_alert_failed",
+                    {"count": len(breakouts), "triggered_by": "manual"},
+                )
+                st.error(
+                    "The breakout alert could not be delivered to every recipient."
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1069,8 +1168,43 @@ with tab_settings:
                 else:
                     st.error("Failed to save. Make sure the Supabase schema is up to date.")
 
+    test_email = prefs.get("notify_email") or USER_EMAIL
+    if st.button("Send test notification", key="send_test_notification"):
+        with st.spinner(f"Sending a test to {test_email}…"):
+            test_sent = send_test_email(test_email)
+        if test_sent:
+            audit(USER_EMAIL, "notification_test_sent", {"to": test_email})
+            st.success(f"Test notification sent to {test_email}.")
+        else:
+            audit(USER_EMAIL, "notification_test_failed", {"to": test_email})
+            st.error(
+                "The test email failed. Check the Render RESEND_API_KEY and "
+                "RESEND_FROM_EMAIL settings."
+            )
+
     st.markdown("---")
     st.markdown('<div class="section-header">Scheduler</div>', unsafe_allow_html=True)
+    scheduler_searches = [
+        search for search in get_saved_searches(USER_EMAIL)
+        if search.get("notify_on_new")
+    ]
+    completed_runs = [
+        search for search in scheduler_searches
+        if search.get("last_run_at")
+    ]
+    if not scheduler_searches:
+        st.info("No saved searches currently have automatic alerts enabled.")
+    elif not completed_runs:
+        st.error(
+            "Automatic alerts have not run yet. The Render cron service needs "
+            "to be created or repaired."
+        )
+    else:
+        latest_run = max(search["last_run_at"] for search in completed_runs)
+        st.success(
+            f"Scheduler activity confirmed. Latest saved-search run: "
+            f"{latest_run[:16].replace('T', ' ')} UTC."
+        )
     st.markdown("""
     <div style="background:white;border-radius:12px;padding:1.25rem 1.5rem;border:1px solid #E8E8EC;font-size:0.85rem;color:#150F3A;">
         <p style="margin:0 0 0.75rem;font-weight:600;">Daily automated sourcing</p>

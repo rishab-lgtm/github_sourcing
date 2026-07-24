@@ -158,7 +158,7 @@ class TestSchedulerUsesServiceKey:
              patch("database.record_snapshots"), \
              patch("database.update_search_run_count"), \
              patch("database.update_saved_search_last_run"), \
-             patch("database.get_prior_handles_for_search", return_value=set()), \
+             patch("database.get_notified_handles_for_search", return_value=set()), \
              patch("database.get_notification_prefs", return_value={"notify_on_new_match": False}), \
              patch("database.get_breakout_candidates", return_value=[]), \
              patch("database.audit"):
